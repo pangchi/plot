@@ -32,10 +32,9 @@ import matplotlib.dates as mdates
 class TrendViewer:
 
     def __init__(self,root):
-
         self.root=root
         self.root.title("Trend Viewer")
-        self.root.geometry("1400x950")
+        self.root.geometry("1400x1000")
 
         self.df=None
         self.filtered_df=None
@@ -59,19 +58,15 @@ class TrendViewer:
         f.pack(pady=4)
 
         tk.Label(f,text="Start").grid(row=0,column=0)
-
         self.start_date=DateEntry(f,date_pattern="yyyy-mm-dd")
         self.start_date.grid(row=0,column=1)
-
         self.start_time=tk.Entry(f,width=8)
         self.start_time.insert(0,"00:00:00")
         self.start_time.grid(row=0,column=2)
 
         tk.Label(f,text="End").grid(row=0,column=3)
-
         self.end_date=DateEntry(f,date_pattern="yyyy-mm-dd")
         self.end_date.grid(row=0,column=4)
-
         self.end_time=tk.Entry(f,width=8)
         self.end_time.insert(0,"23:59:59")
         self.end_time.grid(row=0,column=5)
@@ -79,6 +74,22 @@ class TrendViewer:
         tk.Button(f,text="Apply",command=self.apply_time_filter).grid(row=0,column=6,padx=5)
         tk.Button(f,text="Export",command=self.export_csv).grid(row=0,column=7,padx=5)
         tk.Button(f,text="Reset X",command=self.reset_x).grid(row=0,column=8,padx=5)
+
+        # -------- Top Y-axis scaling controls --------
+        y_frame = tk.Frame(root)
+        y_frame.pack(pady=4)
+
+        tk.Label(y_frame, text="Top Y-axis Min").grid(row=0, column=0)
+        self.ymin_entry = tk.Entry(y_frame, width=8)
+        self.ymin_entry.grid(row=0, column=1)
+        self.ymin_entry.insert(0, "")
+
+        tk.Label(y_frame, text="Top Y-axis Max").grid(row=0, column=2)
+        self.ymax_entry = tk.Entry(y_frame, width=8)
+        self.ymax_entry.grid(row=0, column=3)
+        self.ymax_entry.insert(0, "")
+
+        tk.Button(y_frame, text="Apply Y Scale", command=self.apply_y_scale).grid(row=0, column=4, padx=5)
 
         # -------- Signal buttons --------
         self.signal_frame=tk.LabelFrame(root,text="Signals")
@@ -117,14 +128,11 @@ class TrendViewer:
         self.canvas.mpl_connect("motion_notify_event",self.pan)
 
     # ---------------- CSV LOAD ----------------
-
     def load_csv_dnd(self,event):
-
         path=event.data.strip("{}")
         self.load_csv(path)
 
     def load_csv(self,path):
-
         try:
             self.df=pd.read_csv(path)
             self.df["Time"]=pd.to_datetime(self.df["Time"])
@@ -157,142 +165,111 @@ class TrendViewer:
         self.apply_time_filter()
 
     # ---------------- FILTER ----------------
-
     def apply_time_filter(self):
-
         if self.df is None:return
-
         start=pd.to_datetime(f"{self.start_date.get()} {self.start_time.get()}")
         end=pd.to_datetime(f"{self.end_date.get()} {self.end_time.get()}")
-
         mask=(self.df["Time"]>=start)&(self.df["Time"]<=end)
-
         self.filtered_df=self.df.loc[mask]
-
         self.reset_plot()
 
     # ---------------- RESET ----------------
-
     def reset_plot(self):
-
         self.ax_main.clear()
         self.ax_roc.clear()
-
         self.ax_main.set_title("Signals")
         self.ax_roc.set_title("Rate of Change")
-
         self.signal_axis_map.clear()
-
         self.vline_main=self.ax_main.axvline(0,color="gray",linestyle="--",visible=False)
         self.vline_roc=self.ax_roc.axvline(0,color="gray",linestyle="--",visible=False)
-
         self.canvas.draw_idle()
 
     # ---------------- SIGNAL TOGGLE ----------------
-
     def toggle_signal(self,event):
-
         if self.filtered_df is None:return
-
         w=event.widget
         s=w.cget("text")
-
         if s in self.signal_axis_map:
-
             line,roc=self.signal_axis_map[s]
-
             line.remove()
             roc.remove()
-
             del self.signal_axis_map[s]
-
             w.config(relief="raised",bg="white",fg="black")
-
         else:
-
             line,=self.ax_main.plot(self.filtered_df["Time"],self.filtered_df[s],label=s)
-
             dt=self.filtered_df["Time"].diff().dt.total_seconds()
             roc=self.filtered_df[s].diff()/dt
-
             roc_line,=self.ax_roc.plot(self.filtered_df["Time"],roc,linestyle="--",label=s)
-
             self.signal_axis_map[s]=(line,roc_line)
-
             w.config(relief="sunken",bg="#4CAF50",fg="white")
 
         self.ax_main.legend()
         self.ax_roc.legend()
-
         self.reset_x()
+
+        # ---------------- AUTO-FILL Y-SCALE ----------------
+        ylim = self.ax_main.get_ylim()
+        self.ymin_entry.delete(0,"end")
+        self.ymin_entry.insert(0,f"{ylim[0]:.4f}")
+        self.ymax_entry.delete(0,"end")
+        self.ymax_entry.insert(0,f"{ylim[1]:.4f}")
 
         self.canvas.draw_idle()
 
+    # ---------------- APPLY TOP Y SCALE ----------------
+    def apply_y_scale(self):
+        if self.filtered_df is None:
+            return
+        try:
+            ymin = float(self.ymin_entry.get())
+            ymax = float(self.ymax_entry.get())
+            if ymin >= ymax:
+                messagebox.showerror("Error", "Ymin must be less than Ymax")
+                return
+            self.ax_main.set_ylim(ymin, ymax)
+            self.canvas.draw_idle()
+        except ValueError:
+            messagebox.showerror("Error", "Please enter valid numeric values for Y-axis")
+
     # ---------------- CURSOR ----------------
-
     def update_cursor(self,event):
-
         if not event.inaxes or self.filtered_df is None:
             return
-
         x=event.xdata
         if x is None:return
-
         x_dt=mdates.num2date(x)
         x_str=x_dt.strftime("%Y-%m-%d %H:%M:%S")
-
         self.vline_main.set_xdata([x])
         self.vline_roc.set_xdata([x])
-
         self.vline_main.set_visible(True)
         self.vline_roc.set_visible(True)
-
         for m in self.highlight_markers:
             try:m.remove()
             except:pass
         self.highlight_markers.clear()
-
         if hasattr(self,"hover_annotation"):
             try:self.hover_annotation.remove()
             except:pass
-
         times=mdates.date2num(self.filtered_df["Time"])
-
-        display=[]
-        y_val=0
-        idx=0
-
+        tooltip_lines = []
         for s,(line,roc_line) in self.signal_axis_map.items():
-
             idx=(np.abs(times-x)).argmin()
-            if idx<1:continue
-
-            y_val=self.filtered_df[s].iloc[idx]
-
-            dt=(self.filtered_df["Time"].iloc[idx]-self.filtered_df["Time"].iloc[idx-1]).total_seconds()
-
-            roc=0 if dt==0 else (self.filtered_df[s].iloc[idx]-self.filtered_df[s].iloc[idx-1])/dt
-
+            if idx<1: continue
+            y_val = self.filtered_df[s].iloc[idx]
+            dt = (self.filtered_df["Time"].iloc[idx]-self.filtered_df["Time"].iloc[idx-1]).total_seconds()
+            roc = 0 if dt==0 else (self.filtered_df[s].iloc[idx]-self.filtered_df[s].iloc[idx-1])/dt
             m1,=self.ax_main.plot(self.filtered_df["Time"].iloc[idx],y_val,'o',color="yellow",markersize=8,zorder=5)
             m2,=self.ax_roc.plot(self.filtered_df["Time"].iloc[idx],roc,'o',color="yellow",markersize=8,zorder=5)
-
             self.highlight_markers.append(m1)
             self.highlight_markers.append(m2)
-
-            display.append(f"{s}: y={y_val:.4f}, ROC={roc:.4f}/s")
-
-        if not display:return
-
-        tooltip="\n".join(display)
-
+            tooltip_lines.append(f"{s}:\nTime={self.filtered_df['Time'].iloc[idx]}\ny={y_val:.4f}\nROC={roc:.4f}/s")
+        if not tooltip_lines: return
+        tooltip = "\n\n".join(tooltip_lines)
         figw,figh=self.fig.get_size_inches()*self.fig.dpi
-
         offx=15
         offy=15
-
         if event.x>figw*0.7: offx=-120
         if event.y>figh*0.7: offy=-60
-
         self.hover_annotation=self.ax_main.annotate(
             tooltip,
             xy=(self.filtered_df["Time"].iloc[idx],y_val),
@@ -301,138 +278,85 @@ class TrendViewer:
             bbox=dict(boxstyle="round",fc="yellow",alpha=0.9),
             arrowprops=dict(arrowstyle="->")
         )
-
-        self.coord_label.config(text=f"(x={x_str})  "+" | ".join(display))
-
+        self.coord_label.config(text=f"(x={x_str})  "+" | ".join([f"{s}: y={self.filtered_df[s].iloc[idx]:.4f}, ROC={((self.filtered_df[s].iloc[idx]-self.filtered_df[s].iloc[idx-1])/((self.filtered_df['Time'].iloc[idx]-self.filtered_df['Time'].iloc[idx-1]).total_seconds() if idx>0 else 0)):.4f}/s" for s,(l,r) in self.signal_axis_map.items()]))
         self.canvas.draw_idle()
 
     # ---------------- ZOOM ----------------
-
     def zoom(self,event):
-
         if self.filtered_df is None:return
-
         factor=0.15
-
         if event.inaxes==self.ax_main:
-
             x=event.xdata
             if x is None:return
-
             left,right=self.ax_main.get_xlim()
-
             scale=(1-factor) if event.button=="up" else (1+factor)
-
             new_left=x-(x-left)*scale
             new_right=x+(right-x)*scale
-
             xmin=mdates.date2num(self.filtered_df["Time"].min())
             xmax=mdates.date2num(self.filtered_df["Time"].max())
-
             new_left=max(new_left,xmin)
             new_right=min(new_right,xmax)
-
             self.ax_main.set_xlim(new_left,new_right)
             self.ax_roc.set_xlim(new_left,new_right)
-
         elif event.inaxes==self.ax_roc:
-
             y=event.ydata
             if y is None:return
-
             bottom,top=self.ax_roc.get_ylim()
-
             scale=(1-factor) if event.button=="up" else (1+factor)
-
             new_bottom=y-(y-bottom)*scale
             new_top=y+(top-y)*scale
-
             self.ax_roc.set_ylim(new_bottom,new_top)
-
         self.canvas.draw_idle()
 
     # ---------------- PAN ----------------
-
     def start_pan(self,event):
-
         if event.button==1:
             self._dragging=True
             self._last_drag_x=event.xdata
-
     def stop_pan(self,event):
-
         self._dragging=False
         self._last_drag_x=None
-
     def pan(self,event):
-
         if not self._dragging or event.xdata is None:return
-
         dx=self._last_drag_x-event.xdata
-
         left,right=self.ax_main.get_xlim()
-
         self.ax_main.set_xlim(left+dx,right+dx)
         self.ax_roc.set_xlim(left+dx,right+dx)
-
         self._last_drag_x=event.xdata
-
         self.canvas.draw_idle()
 
     # ---------------- RESET X ----------------
-
     def reset_x(self):
-
         if self.filtered_df is None:return
-
         xmin=self.filtered_df["Time"].min()
         xmax=self.filtered_df["Time"].max()
-
         self.ax_main.set_xlim(xmin,xmax)
         self.ax_roc.set_xlim(xmin,xmax)
-
         self.ax_main.relim()
         self.ax_main.autoscale_view(scalex=False,scaley=True)
-
         self.ax_roc.relim()
         self.ax_roc.autoscale_view(scalex=False,scaley=True)
-
         self.canvas.draw_idle()
 
     # ---------------- EXPORT ----------------
-
     def export_csv(self):
-
         if self.filtered_df is None:return
-
         path=filedialog.asksaveasfilename(defaultextension=".csv")
-
         if path:
             self.filtered_df.to_csv(path,index=False)
 
     # ---------------- SCREENSHOT ----------------
-
     def save_screenshot(self,event=None):
-
         if self.last_loaded_file is None:return
-
         folder=os.path.dirname(self.last_loaded_file)
-
         ts=datetime.now().strftime("%Y%m%d_%H%M%S")
-
         path=os.path.join(folder,f"trend_capture_{ts}.png")
-
         self.fig.savefig(path,dpi=300)
-
         print("Saved:",path)
 
 
 # ---------------- MAIN ----------------
-
 if __name__=="__main__":
-
     root=TkinterDnD.Tk()
-
     app=TrendViewer(root)
-
     root.mainloop()
