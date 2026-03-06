@@ -119,6 +119,7 @@ class TrendViewer:
         self.canvas.mpl_connect("button_press_event",self.start_pan)
         self.canvas.mpl_connect("button_release_event",self.stop_pan)
         self.canvas.mpl_connect("motion_notify_event",self.pan)
+        self.canvas.mpl_connect("figure_leave_event", self.on_mouse_leave)
 
     # ---------------- CSV LOAD ----------------
     def load_csv_dnd(self,event):
@@ -248,7 +249,12 @@ class TrendViewer:
 
     # ---------------- CURSOR / HOVER ----------------
     def update_cursor(self,event):
-        if not event.inaxes or self.filtered_df is None: return
+        if not event.inaxes or self.filtered_df is None: 
+            if hasattr(self,"hover_annotation"):
+                self.hover_annotation.set_visible(False)
+            self.canvas.draw_idle()
+            return
+
         x=event.xdata
         if x is None: return
         x_dt = mdates.num2date(x)
@@ -285,7 +291,6 @@ class TrendViewer:
             m2,=self.ax_roc.plot(self.filtered_df["Time"].iloc[idx],roc,'o',color="yellow",markersize=8,zorder=5)
             self.highlight_markers.extend([m1,m2])
 
-            # Compute min/max/std for visible range
             vals = self.filtered_df[s][mask]
             vmin = vals.min()
             vmax = vals.max()
@@ -312,8 +317,13 @@ class TrendViewer:
             )
             self.coord_label.config(text=f"(x={x_str})")
 
-        # Update bottom stats label
         self.update_stats_label()
+        self.canvas.draw_idle()
+
+    # ---------------- HIDE HOVER ON LEAVE ----------------
+    def on_mouse_leave(self,event):
+        if hasattr(self,"hover_annotation"):
+            self.hover_annotation.set_visible(False)
         self.canvas.draw_idle()
 
     # ---------------- UPDATE STATS LABEL ----------------
@@ -330,7 +340,7 @@ class TrendViewer:
             vals=self.filtered_df[s][mask]
             if len(vals)==0: continue
             lines.append(f"{s}: Min={vals.min():.4f}, Max={vals.max():.4f}, Std={vals.std():.4f}")
-        self.stats_label.config(text=" | ".join(lines))
+        self.stats_label.config(text="\n".join(lines))
 
     # ---------------- ZOOM / PAN / RESET ----------------
     def zoom(self,event):
