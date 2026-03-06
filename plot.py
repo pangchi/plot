@@ -133,22 +133,40 @@ class TrendViewer:
         for w in self.signal_frame.winfo_children():
             w.destroy()
 
+        max_per_row = 12
+        row = 0
+        col = 0
+
         for c in self.df.columns:
-            if c!="Time":
-                b=tk.Label(self.signal_frame,text=c,bg="white",relief="raised",padx=6)
-                b.pack(side="left",padx=3)
-                b.bind("<Button-1>",self.toggle_signal)
+            if c != "Time":
 
-        tmin=self.df["Time"].min()
-        tmax=self.df["Time"].max()
-        self.start_date.set_date(tmin.date())
-        self.start_time.delete(0,"end")
-        self.start_time.insert(0,tmin.strftime("%H:%M:%S"))
-        self.end_date.set_date(tmax.date())
-        self.end_time.delete(0,"end")
-        self.end_time.insert(0,tmax.strftime("%H:%M:%S"))
+                b = tk.Label(
+                    self.signal_frame,
+                    text=c,
+                    bg="white",
+                    relief="raised",
+                    padx=6,
+                    pady=3
+                )
 
-        self.apply_time_filter()
+                b.grid(row=row, column=col, padx=3, pady=3, sticky="w")
+                b.bind("<Button-1>", self.toggle_signal)
+
+                col += 1
+                if col >= max_per_row:
+                    col = 0
+                    row += 1
+
+                tmin=self.df["Time"].min()
+                tmax=self.df["Time"].max()
+                self.start_date.set_date(tmin.date())
+                self.start_time.delete(0,"end")
+                self.start_time.insert(0,tmin.strftime("%H:%M:%S"))
+                self.end_date.set_date(tmax.date())
+                self.end_time.delete(0,"end")
+                self.end_time.insert(0,tmax.strftime("%H:%M:%S"))
+
+                self.apply_time_filter()
 
     # ---------------- FILTER ----------------
     def apply_time_filter(self):
