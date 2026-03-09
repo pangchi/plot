@@ -294,10 +294,11 @@ class TrendViewer:
             vals = self.filtered_df[s][mask]
             vmin = vals.min()
             vmax = vals.max()
+            vmean = vals.mean()
             vstd = vals.std()
 
             tooltip_lines.append(
-                f"{s}:\nTime={self.filtered_df['Time'].iloc[idx]}\ny={y_val:.4f}\nROC={roc:.4f}/s\nMin={vmin:.4f} Max={vmax:.4f} StdDev={vstd:.4f}"
+                f"{s}:\nTime={self.filtered_df['Time'].iloc[idx]}\ny={y_val:.4f}\nROC={roc:.4f}/s\nMin={vmin:.4f} Max={vmax:.4f} Mean={vmean:.4f} StdDev={vstd:.4f}"
             )
 
         if tooltip_lines:
@@ -332,16 +333,44 @@ class TrendViewer:
             self.stats_label.config(text="")
             return
 
+        import math
         xlim = self.ax_main.get_xlim()
-        mask = (mdates.date2num(self.filtered_df["Time"].to_numpy()) >= xlim[0]) & \
-               (mdates.date2num(self.filtered_df["Time"].to_numpy()) <= xlim[1])
-        lines=[]
-        for s,_ in self.signal_axis_map.items():
-            vals=self.filtered_df[s][mask]
-            if len(vals)==0: continue
-            lines.append(f"{s}: Min={vals.min():.4f}, Max={vals.max():.4f}, Std={vals.std():.4f}")
-        self.stats_label.config(text="\n".join(lines))
 
+        mask = (mdates.date2num(self.filtered_df["Time"].to_numpy()) >= xlim[0]) & \
+            (mdates.date2num(self.filtered_df["Time"].to_numpy()) <= xlim[1])
+
+        stats = []
+
+        for s,_ in self.signal_axis_map.items():
+            vals = self.filtered_df[s][mask]
+            if len(vals) == 0:
+                continue
+
+            stats.append(
+                f"{s}: Min={vals.min():.4f}  Max={vals.max():.4f}  Mean={vals.mean():.4f} Median={vals.median():.4f} Std={vals.std():.4f}"
+            )
+
+        if not stats:
+            self.stats_label.config(text="")
+            return
+    
+        cols = 3   # number of columns
+        rows = math.ceil(len(stats)/cols)
+
+        grid = [[""]*cols for _ in range(rows)]
+
+        for i,txt in enumerate(stats):
+            r = i % rows
+            c = i // rows
+            grid[r][c] = txt
+
+        lines=[]
+        for r in grid:
+            line = "     ".join(f"{x:<40}" for x in r if x)
+            lines.append(line)
+
+        self.stats_label.config(text="\n".join(lines))
+        
     # ---------------- ZOOM / PAN / RESET ----------------
     def zoom(self,event):
         if self.filtered_df is None:return
