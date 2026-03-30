@@ -114,7 +114,19 @@ class TrendViewer:
         self.derived_signals = {}   # name -> expression string
         self.all_signal_buttons = {}  # signal name -> tk.Label widget
 
-        self._dragging = False
+        # rubber-band zoom state (left-button drag)
+        self._rb_active    = False   # currently drawing a rubber band
+        self._rb_press_x   = None   # canvas pixel x where press started
+        self._rb_press_y   = None   # canvas pixel y where press started
+        self._rb_start_x   = None   # data-x where drag started
+        self._rb_start_y   = None   # data-y where drag started
+        self._rb_start_ax  = None   # which axes the drag started in
+        self._rb_rect_main = None   # Rectangle patch on ax_main
+        self._rb_rect_roc  = None   # Rectangle patch on ax_roc
+        self._rb_MIN_PX    = 5      # pixel threshold before rubber-band activates
+
+        # pan state (kept for middle-button / scroll-wheel pan legacy)
+        self._dragging    = False
         self._last_drag_x = None
 
         root.bind("<Print>", self.save_screenshot)
@@ -142,9 +154,12 @@ class TrendViewer:
         self.end_time.insert(0, "23:59:59")
         self.end_time.grid(row=0, column=5)
 
-        tk.Button(f, text="Apply", command=self.apply_time_filter).grid(row=0, column=6, padx=5)
-        tk.Button(f, text="Export", command=self.export_csv).grid(row=0, column=7, padx=5)
+        tk.Button(f, text="Apply",   command=self.apply_time_filter).grid(row=0, column=6, padx=5)
+        tk.Button(f, text="Export",  command=self.export_csv).grid(row=0, column=7, padx=5)
         tk.Button(f, text="Reset X", command=self.reset_x).grid(row=0, column=8, padx=5)
+        tk.Button(f, text="FFT", command=self.show_fft,
+                  bg="#7B1FA2", fg="white", font=("TkDefaultFont", 9, "bold")
+                  ).grid(row=0, column=9, padx=5)
 
         # -------- Signal search + derived signal row --------
         sf = tk.Frame(root)
@@ -821,24 +836,119 @@ class TrendViewer:
         self.canvas.draw_idle()
 
     def start_pan(self, event):
-        if event.button == 1:
-            self._dragging = True
-            self._last_drag_x = event.xdata
+        """Left-click press — record start point for rubber-band zoom."""
+        if event.button == 1 and event.inaxes in (self.ax_main, self.ax_roc):
+            self._rb_press_x  = event.x        # pixel coords for threshold check
+            self._rb_press_y  = event.y
+            self._rb_start_x  = event.xdata    # data coords
+            self._rb_start_y  = event.ydata
+            self._rb_start_ax = event.inaxes
+            self._rb_active   = False           # not yet committed as rubber-band
 
     def stop_pan(self, event):
-        self._dragging = False
-        self._last_drag_x = None
+        """Left-click release — apply zoom if rubber-band was drawn."""
+        if event.button != 1:
+            return
+
+        # Remove rubber-band rectangles
+        if self._rb_rect_main is not None:
+            try: self._rb_rect_main.remove()
+            except: pass
+            self._rb_rect_main = None
+        if self._rb_rect_roc is not None:
+            try: self._rb_rect_roc.remove()
+            except: pass
+            self._rb_rect_roc = None
+
+        if self._rb_active and self._rb_start_x is not None and event.xdata is not None:
+            x0, x1 = sorted([self._rb_start_x, event.xdata])
+            if x1 - x0 > 0:
+                self.ax_main.set_xlim(x0, x1)
+                self.ax_roc.set_xlim(x0, x1)
+
+                # Y zoom only on whichever axes the drag started in
+                y0_raw = self._rb_start_y
+                y1_raw = event.ydata
+                if y0_raw is not None and y1_raw is not None and abs(y1_raw - y0_raw) > 1e-10:
+                    ylo, yhi = sorted([y0_raw, y1_raw])
+                    if self._rb_start_ax == self.ax_main:
+                        self.ax_main.set_ylim(ylo, yhi)
+                    elif self._rb_start_ax == self.ax_roc:
+                        self.ax_roc.set_ylim(ylo, yhi)
+
+                self.update_time_entries()
+                self.update_stats_label()
+
+        self._rb_active   = False
+        self._rb_start_x  = None
+        self._rb_start_y  = None
+        self._rb_press_x  = None
+        self._rb_press_y  = None
+        self._rb_start_ax = None
+        self.canvas.draw_idle()
 
     def pan(self, event):
-        if not self._dragging or event.xdata is None: return
-        dx = self._last_drag_x - event.xdata
-        left, right = self.ax_main.get_xlim()
-        self.ax_main.set_xlim(left + dx, right + dx)
-        self.ax_roc.set_xlim(left + dx, right + dx)
-        self._last_drag_x = event.xdata
-        self.update_time_entries()
-        self.auto_adjust_yaxis()
-        self.update_stats_label()
+        """Mouse motion — draw rubber-band rectangle while left-button held."""
+        if self._rb_start_x is None or event.xdata is None:
+            return
+        if event.button != 1:
+            return
+
+        # Commit to rubber-band mode once threshold exceeded
+        if not self._rb_active:
+            dx_px = abs(event.x - (self._rb_press_x or event.x))
+            dy_px = abs(event.y - (self._rb_press_y or event.y))
+            if dx_px < self._rb_MIN_PX and dy_px < self._rb_MIN_PX:
+                return   # still within click threshold — do nothing yet
+            self._rb_active = True
+
+        # --- draw rubber-band on ax_main ---
+        x0 = self._rb_start_x
+        x1 = event.xdata
+
+        # For Y: clamp to the axes the drag started in; use full y-range on the other
+        ylim_main = self.ax_main.get_ylim()
+        ylim_roc  = self.ax_roc.get_ylim()
+
+        if self._rb_start_ax == self.ax_main:
+            y0_main = self._rb_start_y
+            y1_main = event.ydata if event.inaxes == self.ax_main else ylim_main[1]
+            y0_roc, y1_roc = ylim_roc
+        else:
+            y0_roc  = self._rb_start_y
+            y1_roc  = event.ydata if event.inaxes == self.ax_roc else ylim_roc[1]
+            y0_main, y1_main = ylim_main
+
+        from matplotlib.patches import Rectangle
+
+        def _update_rect(old_rect, ax, rx0, ry0, rx1, ry1):
+            if old_rect is not None:
+                try: old_rect.remove()
+                except: pass
+            w = rx1 - rx0
+            h = ry1 - ry0
+            rect = Rectangle(
+                (min(rx0, rx1), min(ry0, ry1)),
+                abs(w), abs(h),
+                linewidth=1.5,
+                edgecolor="#1976D2",
+                facecolor="#90CAF9",
+                alpha=0.25,
+                linestyle=(0, (6, 3)),   # dashed
+                zorder=10,
+            )
+            ax.add_patch(rect)
+            return rect
+
+        self._rb_rect_main = _update_rect(
+            self._rb_rect_main, self.ax_main,
+            x0, y0_main, x1, y1_main
+        )
+        self._rb_rect_roc = _update_rect(
+            self._rb_rect_roc, self.ax_roc,
+            x0, y0_roc, x1, y1_roc
+        )
+
         self.canvas.draw_idle()
 
     def update_time_entries(self):
@@ -861,6 +971,232 @@ class TrendViewer:
         self.auto_adjust_yaxis()
         self.update_stats_label()
         self.canvas.draw_idle()
+
+    # ================================================================
+    # FOURIER TRANSFORM
+    # ================================================================
+    def show_fft(self):
+        if self.filtered_df is None:
+            messagebox.showwarning("No data", "Load a CSV first.")
+            return
+        if not self.signal_axis_map:
+            messagebox.showwarning("No signals", "Select at least one signal to analyse.")
+            return
+
+        # ---- get the currently visible x window ----
+        xlim  = self.ax_main.get_xlim()
+        t_num = mdates.date2num(self.filtered_df["Time"].to_numpy())
+        mask  = (t_num >= xlim[0]) & (t_num <= xlim[1])
+        view_df = self.filtered_df[mask].copy()
+
+        if len(view_df) < 4:
+            messagebox.showwarning("Too few points", "Zoom out — need at least 4 samples in view.")
+            return
+
+        # ---- build window ----
+        win = tk.Toplevel(self.root)
+        win.title("FFT — Frequency Spectrum (zoomed view)")
+        win.geometry("1050x700")
+
+        # Options bar
+        opt_frame = tk.Frame(win)
+        opt_frame.pack(fill="x", padx=8, pady=4)
+
+        tk.Label(opt_frame, text="Window:").pack(side="left")
+        win_var = tk.StringVar(value="hann")
+        for w in ("none", "hann", "hamming", "blackman", "flattop"):
+            tk.Radiobutton(opt_frame, text=w, variable=win_var, value=w,
+                           command=lambda: _refresh()).pack(side="left", padx=3)
+
+        tk.Label(opt_frame, text="   Scale:").pack(side="left")
+        scale_var = tk.StringVar(value="linear")
+        for s in ("linear", "log"):
+            tk.Radiobutton(opt_frame, text=s, variable=scale_var, value=s,
+                           command=lambda: _refresh()).pack(side="left", padx=3)
+
+        tk.Label(opt_frame, text="   Y:").pack(side="left")
+        ymode_var = tk.StringVar(value="amplitude")
+        for y in ("amplitude", "power", "dB"):
+            tk.Radiobutton(opt_frame, text=y, variable=ymode_var, value=y,
+                           command=lambda: _refresh()).pack(side="left", padx=3)
+
+        # Peak-count spinbox
+        tk.Label(opt_frame, text="   Peaks:").pack(side="left")
+        peak_var = tk.IntVar(value=5)
+        tk.Spinbox(opt_frame, from_=0, to=20, width=3, textvariable=peak_var,
+                   command=lambda: _refresh()).pack(side="left", padx=3)
+
+        # Export FFT button
+        def _export_fft():
+            path = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV", "*.csv")],
+                title="Export FFT data"
+            )
+            if not path: return
+            rows = []
+            for sig in self.signal_axis_map:
+                if sig not in view_df.columns: continue
+                y = view_df[sig].to_numpy(dtype=float)
+                y = y - y.mean()
+                n = len(y)
+                t_sec = (view_df["Time"].iloc[-1] - view_df["Time"].iloc[0]).total_seconds()
+                fs = (n - 1) / t_sec if t_sec > 0 else 1.0
+                freqs = np.fft.rfftfreq(n, d=1.0/fs)
+                amp   = np.abs(np.fft.rfft(y)) * 2 / n
+                for f, a in zip(freqs, amp):
+                    rows.append({"Signal": sig, "Frequency_Hz": f,
+                                 "Amplitude": a, "Period_s": 1/f if f > 0 else np.inf})
+            pd.DataFrame(rows).to_csv(path, index=False)
+            messagebox.showinfo("Exported", f"FFT data saved to:\n{path}")
+
+        tk.Button(opt_frame, text="Export FFT CSV", command=_export_fft,
+                  bg="#388E3C", fg="white").pack(side="right", padx=6)
+
+        # ---- matplotlib figure inside the Toplevel ----
+        n_sigs = len(self.signal_axis_map)
+        fig_fft, axes = plt.subplots(
+            n_sigs, 1,
+            figsize=(10, max(3, 3 * n_sigs)),
+            squeeze=False
+        )
+        fig_fft.suptitle("Fourier Transform — Frequency Spectrum", fontsize=13, fontweight="bold")
+
+        canvas_fft = FigureCanvasTkAgg(fig_fft, master=win)
+        canvas_fft.get_tk_widget().pack(fill="both", expand=True)
+        toolbar_fft = NavigationToolbar2Tk(canvas_fft, win)
+        toolbar_fft.update()
+
+        # Info label at bottom
+        info_lbl = tk.Label(win, text="", anchor="w", bg="#EDE7F6", justify="left",
+                            font=("Courier", 9))
+        info_lbl.pack(fill="x", padx=4, pady=2)
+
+        # ---- window function map ----
+        WINDOW_FN = {
+            "none":     lambda n: np.ones(n),
+            "hann":     np.hanning,
+            "hamming":  np.hamming,
+            "blackman": np.blackman,
+            "flattop":  lambda n: np.blackman(n),   # fallback; scipy not required
+        }
+        try:
+            from scipy.signal.windows import flattop as _flattop
+            WINDOW_FN["flattop"] = _flattop
+        except ImportError:
+            pass
+
+        def _refresh():
+            wname  = win_var.get()
+            yscale = scale_var.get()
+            ymode  = ymode_var.get()
+            n_peaks = peak_var.get()
+            wfn    = WINDOW_FN.get(wname, np.hanning)
+
+            info_parts = []
+
+            for ax, sig in zip(axes[:, 0], list(self.signal_axis_map.keys())):
+                ax.clear()
+
+                if sig not in view_df.columns:
+                    ax.set_title(f"{sig} — not in view")
+                    continue
+
+                y = view_df[sig].to_numpy(dtype=float)
+                y = y - y.mean()          # remove DC offset
+                n = len(y)
+
+                # Estimate sample rate from median time delta
+                dt_arr = np.diff(
+                    view_df["Time"].to_numpy().astype("datetime64[ns]")
+                ).astype(float) * 1e-9   # → seconds
+                dt_med = np.median(dt_arr) if len(dt_arr) else 1.0
+                if dt_med <= 0: dt_med = 1.0
+                fs = 1.0 / dt_med
+
+                # Apply window
+                window = wfn(n)
+                # Coherent gain correction so amplitude is physical
+                cg = window.mean()
+                y_win = y * window
+
+                # FFT
+                fft_vals = np.fft.rfft(y_win)
+                freqs    = np.fft.rfftfreq(n, d=1.0 / fs)
+
+                # Amplitude spectrum (peak-normalised by window coherent gain)
+                amp = np.abs(fft_vals) * 2 / (n * cg)
+                amp[0] /= 2  # DC bin is one-sided already
+
+                if ymode == "amplitude":
+                    y_plot = amp
+                    ylabel = "Amplitude"
+                elif ymode == "power":
+                    y_plot = amp ** 2
+                    ylabel = "Power"
+                else:  # dB
+                    y_plot = 20 * np.log10(np.maximum(amp, 1e-12))
+                    ylabel = "Magnitude (dB)"
+
+                # Plot
+                ax.plot(freqs[1:], y_plot[1:], color="#7B1FA2", linewidth=1.0)
+                ax.fill_between(freqs[1:], y_plot[1:], alpha=0.15, color="#CE93D8")
+                ax.set_xlabel("Frequency (Hz)")
+                ax.set_ylabel(ylabel)
+                ax.set_title(sig)
+                ax.set_xscale(yscale)
+                if yscale == "log":
+                    ax.set_xscale("log")
+                ax.grid(True, which="both", alpha=0.3)
+
+                # ---- dominant peaks annotation ----
+                if n_peaks > 0 and len(amp) > 2:
+                    from scipy.signal import find_peaks as _fp
+                    try:
+                        peak_idx, props = _fp(amp[1:], height=amp[1:].max() * 0.05)
+                        peak_idx += 1   # offset for dc removal
+                    except Exception:
+                        # fallback: argsort
+                        peak_idx = np.argsort(amp[1:])[::-1][:n_peaks] + 1
+                        props = {}
+
+                    # Sort by amplitude descending, take top n_peaks
+                    peak_idx = sorted(peak_idx, key=lambda i: amp[i], reverse=True)[:n_peaks]
+
+                    sig_info = [f"{sig}:"]
+                    for rank, pi in enumerate(peak_idx, 1):
+                        f_hz  = freqs[pi]
+                        a_val = y_plot[pi]
+                        period = 1.0 / f_hz if f_hz > 0 else np.inf
+                        ax.axvline(f_hz, color="red", linewidth=0.8, linestyle="--", alpha=0.6)
+                        ax.annotate(
+                            f"#{rank}\n{f_hz:.3f} Hz\nT={period:.3f}s",
+                            xy=(f_hz, a_val),
+                            xytext=(6, 4), textcoords="offset points",
+                            fontsize=7, color="darkred",
+                            bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.7)
+                        )
+                        sig_info.append(
+                            f"  #{rank}: {f_hz:.4f} Hz  |  T={period:.4f}s  |  "
+                            f"{'amp' if ymode=='amplitude' else ymode}={a_val:.4f}"
+                        )
+                    info_parts.append("\n".join(sig_info))
+
+                # Duration / sample info as subtitle
+                t_span = (view_df["Time"].iloc[-1] - view_df["Time"].iloc[0]).total_seconds()
+                df_res  = fs / n   # frequency resolution
+                ax.set_title(
+                    f"{sig}   [N={n}, fs≈{fs:.2f} Hz, Δf={df_res:.4f} Hz, "
+                    f"span={t_span:.2f}s, window={wname}]",
+                    fontsize=9
+                )
+
+            fig_fft.tight_layout(rect=[0, 0, 1, 0.95])
+            canvas_fft.draw_idle()
+            info_lbl.config(text="\n".join(info_parts) if info_parts else "")
+
+        # Initial render
+        _refresh()
 
     # ================================================================
     # EXPORT / SCREENSHOT
