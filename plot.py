@@ -3,7 +3,7 @@ import subprocess
 import importlib
 
 # ---------------- AUTO INSTALL ----------------
-packages = ["pandas","matplotlib","numpy","tkinterdnd2","tkcalendar", "scipy"]
+packages = ["pandas","matplotlib","numpy","tkinterdnd2","tkcalendar"]
 
 def install(pkg):
     try:
@@ -638,9 +638,6 @@ class TrendViewer:
         s = w.cget("text")
 
         if s in self.signal_axis_map:
-            line, roc = self.signal_axis_map[s]
-            line.remove()
-            roc.remove()
             del self.signal_axis_map[s]
             is_derived = s in self.derived_signals
             w.config(relief="raised", bg="#E3F2FD" if is_derived else "white", fg="black")
@@ -648,27 +645,70 @@ class TrendViewer:
             if s not in self.filtered_df.columns:
                 messagebox.showerror("Missing column", f"'{s}' not in current data.")
                 return
-            n = len(self.filtered_df)
-            indices = downsample_indices(n)
-            x_data  = self.filtered_df["Time"].iloc[indices]
-            y_data  = self.filtered_df[s].iloc[indices]
-            line,   = self.ax_main.plot(x_data, y_data, label=s)
-
-            roc = self.filtered_df[s].diff() / self.filtered_df["Time"].diff().dt.total_seconds()
-            roc.iloc[0] = 0
-            roc_ds  = roc.iloc[indices]
-            roc_line, = self.ax_roc.plot(x_data, roc_ds, linestyle="--", label=s)
-
-            self.signal_axis_map[s] = (line, roc_line)
+            self.signal_axis_map[s] = None   # placeholder; drawn in _redraw_signals
             w.config(relief="sunken", bg="#4CAF50", fg="white")
 
-        self.ax_main.legend()
-        self.ax_roc.legend()
+        self._redraw_signals()
         self.auto_adjust_yaxis()
         self.update_stats_label()
         self.canvas.draw_idle()
 
     # ================================================================
+    # REDRAW SIGNALS — always samples from the visible x window
+    # ================================================================
+    def _redraw_signals(self):
+        """Re-plot every active signal using only the points currently in
+        xlim, downsampled to max_points when needed.  Calling this on every
+        zoom/pan/reset means zooming in always reveals full-resolution data."""
+        if self.filtered_df is None:
+            return
+
+        xlim   = self.ax_main.get_xlim()
+        t_num  = mdates.date2num(self.filtered_df["Time"].to_numpy())
+        v_mask = (t_num >= xlim[0]) & (t_num <= xlim[1])
+        view   = self.filtered_df[v_mask]
+
+        # Stable colour assignment keyed by signal name
+        prop_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+        all_names  = list(self.signal_axis_map.keys())
+
+        # Remove all existing signal lines (leave vlines and markers alone)
+        keep = {self.vline_main, self.vline_roc}
+        for artist in list(self.ax_main.lines) + list(self.ax_roc.lines):
+            if artist not in keep:
+                try:
+                    artist.remove()
+                except Exception:
+                    pass
+
+        new_map = {}
+        for i, s in enumerate(all_names):
+            color = prop_cycle[i % len(prop_cycle)]
+            n     = len(view)
+            if n == 0:
+                line,     = self.ax_main.plot([], [], label=s, color=color)
+                roc_line, = self.ax_roc.plot([], [], linestyle="--", label=s, color=color)
+                new_map[s] = (line, roc_line)
+                continue
+
+            indices = downsample_indices(n)
+            x_data  = view["Time"].iloc[indices]
+            y_data  = view[s].iloc[indices]
+            line,   = self.ax_main.plot(x_data, y_data, label=s, color=color)
+
+            roc      = view[s].diff() / view["Time"].diff().dt.total_seconds()
+            roc.iloc[0] = 0
+            roc_ds   = roc.iloc[indices]
+            roc_line, = self.ax_roc.plot(x_data, roc_ds, linestyle="--", label=s, color=color)
+
+            new_map[s] = (line, roc_line)
+
+        self.signal_axis_map = new_map
+        self.ax_main.legend()
+        self.ax_roc.legend()
+
+    # ================================================================
+    # AUTO Y-AXIS    # ================================================================
     # AUTO Y-AXIS
     # ================================================================
     def auto_adjust_yaxis(self):
@@ -831,6 +871,7 @@ class TrendViewer:
             self.ax_main.set_xlim(new_left, new_right)
             self.ax_roc.set_xlim(new_left,  new_right)
             self.update_time_entries()
+            self._redraw_signals()
             self.auto_adjust_yaxis()
             self.update_stats_label()
         self.canvas.draw_idle()
@@ -877,6 +918,8 @@ class TrendViewer:
                         self.ax_roc.set_ylim(ylo, yhi)
 
                 self.update_time_entries()
+                self._redraw_signals()
+                self.auto_adjust_yaxis()
                 self.update_stats_label()
 
         self._rb_active   = False
@@ -968,6 +1011,7 @@ class TrendViewer:
         self.ax_main.set_xlim(xmin, xmax)
         self.ax_roc.set_xlim(xmin, xmax)
         self.update_time_entries()
+        self._redraw_signals()
         self.auto_adjust_yaxis()
         self.update_stats_label()
         self.canvas.draw_idle()
