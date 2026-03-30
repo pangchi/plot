@@ -3,7 +3,7 @@ import subprocess
 import importlib
 
 # ---------------- AUTO INSTALL ----------------
-packages = ["pandas","matplotlib","numpy","tkinterdnd2","tkcalendar"]
+packages = ["pandas","matplotlib","numpy","tkinterdnd2","tkcalendar", "scipy"]
 
 def install(pkg):
     try:
