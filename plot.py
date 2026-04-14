@@ -512,7 +512,14 @@ class TrendViewer:
     def load_csv(self, path):
         try:
             self.df = pd.read_csv(path)
-            self.df["Time"] = pd.to_datetime(self.df["Time"])
+            self.df["Time"] = pd.to_datetime(self.df["Time"], utc=False)
+            has_tz = self.df["Time"].dt.tz is not None
+            if has_tz:
+                self.df["Time"] = (
+                    self.df["Time"]
+                    .dt.tz_convert(datetime.now().astimezone().tzinfo)
+                    .dt.tz_localize(None)
+                )
         except Exception as e:
             messagebox.showerror("Error", str(e))
             return
