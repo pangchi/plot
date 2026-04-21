@@ -93,14 +93,12 @@ class TrendViewer:
 
         self.df = None
         self.filtered_df = None
-        # signal_axis_map: name -> (line_main, line_roc)  (still used for active set)
         self.signal_axis_map = {}
-        # NEW: which Y-axis each signal is on: name -> "left" | "right"
         self.signal_side = {}
         self.highlight_markers = []
         self.last_loaded_file = None
         self.derived_signals = {}
-        self.all_signal_buttons = {}  # signal name -> dict {btn, side_btn}
+        self.all_signal_buttons = {}
 
         # rubber-band zoom state
         self._rb_active    = False
@@ -218,7 +216,6 @@ class TrendViewer:
         self.ax_roc_r.set_ylabel("ROC (right)", color="#BF360C", labelpad=2)
         self.ax_main_r.tick_params(axis="y", colors="#BF360C")
         self.ax_roc_r.tick_params(axis="y", colors="#BF360C")
-        # Initially hide them (no label when empty)
         self.ax_main_r.set_visible(False)
         self.ax_roc_r.set_visible(False)
 
@@ -256,16 +253,11 @@ class TrendViewer:
     # HELPERS — which axes to use for a signal
     # ================================================================
     def _axes_for(self, name):
-        """Return (main_ax, roc_ax) for this signal depending on its side."""
         if self.signal_side.get(name, "left") == "right":
             return self.ax_main_r, self.ax_roc_r
         return self.ax_main, self.ax_roc
 
     def _update_secondary_visibility(self):
-        """Show/hide right-side axes based on whether any signal is on the right."""
-        has_right = any(v == "right" for v in self.signal_side.values()
-                        if v is not None)
-        # Only check active signals
         has_right_active = any(
             self.signal_side.get(s) == "right"
             for s in self.signal_axis_map
@@ -565,18 +557,15 @@ class TrendViewer:
                 self._add_signal_button(c)
 
     def _add_signal_button(self, name, derived=False):
-        """Add a signal button row: [signal label] [L/R toggle]"""
-        max_per_row = 8  # slightly reduced to make room for axis toggle
+        max_per_row = 8
         existing = list(self.all_signal_buttons.keys())
         idx = len(existing)
         row = idx // max_per_row
-        col = (idx % max_per_row) * 2   # *2 because each signal uses 2 grid columns
+        col = (idx % max_per_row) * 2
 
-        # Default side is left
         if name not in self.signal_side:
             self.signal_side[name] = "left"
 
-        # Container frame for the pair
         container = tk.Frame(self.signal_frame)
         container.grid(row=row, column=col, columnspan=2, padx=2, pady=2, sticky="w")
 
@@ -594,7 +583,6 @@ class TrendViewer:
         if derived:
             btn.bind("<Button-3>", lambda e, n=name: self._remove_derived_signal(n))
 
-        # Axis-side toggle button
         side_btn = tk.Label(
             container,
             text="L",
@@ -615,18 +603,15 @@ class TrendViewer:
             "side_btn": side_btn,
         }
 
-        # Re-apply search filter
         query = self.search_var.get().strip().lower()
         if query and query not in name.lower():
             container.grid_remove()
 
     def _toggle_signal_side(self, name):
-        """Switch a signal between left and right Y-axis."""
         current = self.signal_side.get(name, "left")
         new_side = "right" if current == "left" else "left"
         self.signal_side[name] = new_side
 
-        # Update button appearance
         widgets = self.all_signal_buttons.get(name)
         if widgets:
             if new_side == "right":
@@ -634,7 +619,6 @@ class TrendViewer:
             else:
                 widgets["side_btn"].config(text="L", bg="#1565C0")
 
-        # If signal is currently active, redraw
         if name in self.signal_axis_map:
             self._redraw_signals()
             self._update_secondary_visibility()
@@ -741,7 +725,6 @@ class TrendViewer:
     # LEGEND UPDATE
     # ================================================================
     def _update_legends(self):
-        """Rebuild legends on all four axes."""
         for ax in (self.ax_main, self.ax_main_r, self.ax_roc, self.ax_roc_r):
             lines, labels = ax.get_legend_handles_labels()
             if lines:
@@ -750,7 +733,7 @@ class TrendViewer:
                 ax.get_legend().remove()
 
     # ================================================================
-    # REDRAW SIGNALS
+    # REDRAW SIGNALS  (FIX: use get_lines() to avoid mutation bug)
     # ================================================================
     def _redraw_signals(self):
         if self.filtered_df is None:
@@ -764,10 +747,11 @@ class TrendViewer:
         prop_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
         all_names  = list(self.signal_axis_map.keys())
 
-        # Remove existing signal lines from ALL four axes
+        # FIX: protect vlines on all axes; use get_lines() (returns a copy) to
+        # avoid skipping artists when removing during iteration
         keep = {self.vline_main, self.vline_roc}
         for ax in (self.ax_main, self.ax_main_r, self.ax_roc, self.ax_roc_r):
-            for artist in list(ax.lines):
+            for artist in ax.get_lines():
                 if artist not in keep:
                     try:
                         artist.remove()
@@ -811,8 +795,8 @@ class TrendViewer:
         t_num = mdates.date2num(self.filtered_df["Time"].to_numpy())
         mask  = (t_num >= xlim[0]) & (t_num <= xlim[1])
 
-        left_vals, right_vals   = [], []
-        left_roc,  right_roc    = [], []
+        left_vals, right_vals = [], []
+        left_roc,  right_roc  = [], []
 
         for s in self.signal_axis_map:
             vals = self.filtered_df[s][mask]
@@ -836,12 +820,15 @@ class TrendViewer:
             self.ax_roc_r.set_ylim(min(right_roc), max(right_roc))
 
     # ================================================================
-    # CURSOR / HOVER
+    # CURSOR / HOVER  (FIX: annotation_clip=False + correct axis host)
     # ================================================================
     def update_cursor(self, event):
         if not event.inaxes or self.filtered_df is None:
             if hasattr(self, "hover_annotation"):
-                self.hover_annotation.set_visible(False)
+                try:
+                    self.hover_annotation.set_visible(False)
+                except Exception:
+                    pass
             self.canvas.draw_idle()
             return
 
@@ -858,18 +845,24 @@ class TrendViewer:
             try: m.remove()
             except: pass
         self.highlight_markers.clear()
+
         if hasattr(self, "hover_annotation"):
-            try: self.hover_annotation.remove()
-            except: pass
+            try:
+                self.hover_annotation.remove()
+            except Exception:
+                pass
+            del self.hover_annotation
 
         times = mdates.date2num(self.filtered_df["Time"].to_numpy())
         idx   = bisect.bisect_left(times, x)
         idx   = min(max(idx, 1), len(times) - 1)
 
         tooltip_lines = []
-        y_val = 0
         xlim  = self.ax_main.get_xlim()
         mask  = (times >= xlim[0]) & (times <= xlim[1])
+
+        last_ann_y   = None
+        last_ann_sig = None
 
         for s in self.signal_axis_map:
             ax_m, ax_r = self._axes_for(s)
@@ -894,19 +887,36 @@ class TrendViewer:
                 f"Min={vmin:.4f}  Max={vmax:.4f}  Mean={vmean:.4f}  Std={vstd:.4f}"
             )
 
+            # Track the last left-axis signal for annotation anchor
+            # (always anchor on ax_main so transform is consistent)
+            if self.signal_side.get(s, "left") == "left":
+                last_ann_y   = y_val
+                last_ann_sig = s
+
         if tooltip_lines:
             tooltip = "\n\n".join(tooltip_lines)
             figw, figh = self.fig.get_size_inches() * self.fig.dpi
             offx, offy = 15, 15
-            if event.x > figw * 0.7: offx = -120
-            if event.y > figh * 0.7: offy = -60
+            if event.x > figw * 0.7: offx = -150
+            if event.y > figh * 0.7: offy = -80
+
+            # FIX: always annotate on ax_main; fall back to first signal value
+            # if no left-axis signal is active
+            if last_ann_y is None:
+                last_ann_sig = list(self.signal_axis_map.keys())[0]
+                last_ann_y   = self.filtered_df[last_ann_sig].iloc[idx]
+
+            ann_time = self.filtered_df["Time"].iloc[idx]
+
             self.hover_annotation = self.ax_main.annotate(
                 tooltip,
-                xy=(self.filtered_df["Time"].iloc[idx], y_val),
+                xy=(ann_time, last_ann_y),
                 xytext=(offx, offy),
                 textcoords="offset points",
                 bbox=dict(boxstyle="round", fc="yellow", alpha=0.9),
-                arrowprops=dict(arrowstyle="->")
+                arrowprops=dict(arrowstyle="->"),
+                annotation_clip=False,   # FIX: don't clip when anchor near edge
+                zorder=20,
             )
             self.coord_label.config(text=f"(x={x_str})")
 
@@ -915,7 +925,10 @@ class TrendViewer:
 
     def on_mouse_leave(self, event):
         if hasattr(self, "hover_annotation"):
-            self.hover_annotation.set_visible(False)
+            try:
+                self.hover_annotation.set_visible(False)
+            except Exception:
+                pass
         self.canvas.draw_idle()
 
     # ================================================================
@@ -1013,17 +1026,28 @@ class TrendViewer:
 
                 y0_raw = self._rb_start_y
                 y1_raw = event.ydata
-                if y0_raw is not None and y1_raw is not None and abs(y1_raw - y0_raw) > 1e-10:
+                y_zoomed = (
+                    y0_raw is not None
+                    and y1_raw is not None
+                    and abs(y1_raw - y0_raw) > 1e-10
+                )
+
+                self.update_time_entries()
+                self._redraw_signals()
+
+                if y_zoomed:
+                    # FIX: apply the Y zoom the user drew; skip auto_adjust so
+                    # it doesn't overwrite the explicit Y range
                     ylo, yhi = sorted([y0_raw, y1_raw])
                     start_ax = self._rb_start_ax
                     if start_ax in (self.ax_main, self.ax_main_r):
                         start_ax.set_ylim(ylo, yhi)
                     elif start_ax in (self.ax_roc, self.ax_roc_r):
                         start_ax.set_ylim(ylo, yhi)
+                else:
+                    # No Y drag — let auto_adjust fit the data
+                    self.auto_adjust_yaxis()
 
-                self.update_time_entries()
-                self._redraw_signals()
-                self.auto_adjust_yaxis()
                 self.update_stats_label()
 
         self._rb_active   = False
@@ -1050,10 +1074,8 @@ class TrendViewer:
         x0 = self._rb_start_x
         x1 = event.xdata
 
-        ylim_main = self.ax_main.get_ylim()
-        ylim_roc  = self.ax_roc.get_ylim()
-        ylim_main_r = self.ax_main_r.get_ylim()
-        ylim_roc_r  = self.ax_roc_r.get_ylim()
+        ylim_main   = self.ax_main.get_ylim()
+        ylim_roc    = self.ax_roc.get_ylim()
 
         start_ax = self._rb_start_ax
 
