@@ -40,13 +40,6 @@ def downsample_indices(n, max_points=5000):
 
 # ---------------- EXPRESSION EVALUATOR ----------------
 def evaluate_expression(expr, df):
-    """
-    Evaluate an Excel-style arithmetic expression using column names as variables.
-    Supports: +, -, *, /, **, (, ), abs(), sqrt(), log(), exp(), sin(), cos(), tan(),
-              min(), max(), mean(), std(), rolling_mean(signal, window), diff(signal)
-    Column names with spaces should be wrapped in backticks: `col name`
-    """
-    # Extract backtick-quoted column names and replace with safe tokens
     token_map = {}
     def replace_col(m):
         col = m.group(1)
@@ -56,8 +49,6 @@ def evaluate_expression(expr, df):
 
     expr_clean = re.sub(r"`([^`]+)`", replace_col, expr)
 
-    # Also detect bare column names (no spaces) that exist in df
-    # Sort by length desc so longer names matched first
     bare_cols = sorted([c for c in df.columns if re.match(r"^\w+$", c)], key=len, reverse=True)
     for col in bare_cols:
         pattern = r"(?<!\w)" + re.escape(col) + r"(?!\w)"
@@ -66,7 +57,6 @@ def evaluate_expression(expr, df):
             token_map[token] = col
             expr_clean = re.sub(pattern, token, expr_clean)
 
-    # Build safe namespace
     safe_ns = {
         "abs": np.abs, "sqrt": np.sqrt, "log": np.log, "log10": np.log10,
         "exp": np.exp, "sin": np.sin, "cos": np.cos, "tan": np.tan,
@@ -81,15 +71,10 @@ def evaluate_expression(expr, df):
         "np": np,
     }
 
-    # Inject column arrays
     for token, col in token_map.items():
         if col not in df.columns:
             raise ValueError(f"Column not found: '{col}'")
         safe_ns[token] = df[col].to_numpy(dtype=float)
-
-    # Rewrite token names to valid python identifiers for eval
-    for token in token_map:
-        expr_clean = expr_clean.replace(token, token)  # already safe identifiers
 
     result = eval(expr_clean, {"__builtins__": {}}, safe_ns)
 
@@ -108,24 +93,26 @@ class TrendViewer:
 
         self.df = None
         self.filtered_df = None
+        # signal_axis_map: name -> (line_main, line_roc)  (still used for active set)
         self.signal_axis_map = {}
+        # NEW: which Y-axis each signal is on: name -> "left" | "right"
+        self.signal_side = {}
         self.highlight_markers = []
         self.last_loaded_file = None
-        self.derived_signals = {}   # name -> expression string
-        self.all_signal_buttons = {}  # signal name -> tk.Label widget
+        self.derived_signals = {}
+        self.all_signal_buttons = {}  # signal name -> dict {btn, side_btn}
 
-        # rubber-band zoom state (left-button drag)
-        self._rb_active    = False   # currently drawing a rubber band
-        self._rb_press_x   = None   # canvas pixel x where press started
-        self._rb_press_y   = None   # canvas pixel y where press started
-        self._rb_start_x   = None   # data-x where drag started
-        self._rb_start_y   = None   # data-y where drag started
-        self._rb_start_ax  = None   # which axes the drag started in
-        self._rb_rect_main = None   # Rectangle patch on ax_main
-        self._rb_rect_roc  = None   # Rectangle patch on ax_roc
-        self._rb_MIN_PX    = 5      # pixel threshold before rubber-band activates
+        # rubber-band zoom state
+        self._rb_active    = False
+        self._rb_press_x   = None
+        self._rb_press_y   = None
+        self._rb_start_x   = None
+        self._rb_start_y   = None
+        self._rb_start_ax  = None
+        self._rb_rect_main = None
+        self._rb_rect_roc  = None
+        self._rb_MIN_PX    = 5
 
-        # pan state (kept for middle-button / scroll-wheel pan legacy)
         self._dragging    = False
         self._last_drag_x = None
 
@@ -192,12 +179,24 @@ class TrendViewer:
         tk.Button(sf, text="Add", command=self._add_derived_signal, bg="#2196F3", fg="white").pack(side="left", padx=4)
         tk.Button(sf, text="?", command=self._show_expr_help, width=2).pack(side="left")
 
-        # -------- Autocomplete popup (Toplevel, no border) --------
-        self._ac_win    = None   # Toplevel window
-        self._ac_lb     = None   # Listbox inside it
-        self._ac_items  = []     # current suggestion list
-        self._ac_sel    = -1     # selected index (-1 = none)
-        self._ac_token  = ""     # the prefix being completed
+        # -------- Legend for Y-axis side indicator --------
+        legend_f = tk.Frame(root, bg="#F5F5F5", bd=1, relief="solid")
+        legend_f.pack(fill="x", padx=4, pady=1)
+        tk.Label(legend_f, text="Axis key:", bg="#F5F5F5", font=("TkDefaultFont", 8)).pack(side="left", padx=4)
+        tk.Label(legend_f, text="[L]", bg="#1565C0", fg="white",
+                 font=("TkDefaultFont", 8, "bold"), padx=4).pack(side="left", padx=2)
+        tk.Label(legend_f, text="= Left / Primary axis", bg="#F5F5F5", font=("TkDefaultFont", 8)).pack(side="left")
+        tk.Label(legend_f, text="[R]", bg="#BF360C", fg="white",
+                 font=("TkDefaultFont", 8, "bold"), padx=4).pack(side="left", padx=(12,2))
+        tk.Label(legend_f, text="= Right / Secondary axis  (click [L]/[R] on any signal to toggle)", bg="#F5F5F5",
+                 font=("TkDefaultFont", 8)).pack(side="left")
+
+        # -------- Autocomplete popup --------
+        self._ac_win    = None
+        self._ac_lb     = None
+        self._ac_items  = []
+        self._ac_sel    = -1
+        self._ac_token  = ""
 
         # -------- Signal buttons panel --------
         self.signal_outer = tk.Frame(root)
@@ -212,6 +211,17 @@ class TrendViewer:
             gridspec_kw={"height_ratios": [3, 1]},
             figsize=(12, 8)
         )
+        # Twin axes for secondary Y
+        self.ax_main_r = self.ax_main.twinx()
+        self.ax_roc_r  = self.ax_roc.twinx()
+        self.ax_main_r.set_ylabel("Secondary axis", color="#BF360C", labelpad=2)
+        self.ax_roc_r.set_ylabel("ROC (right)", color="#BF360C", labelpad=2)
+        self.ax_main_r.tick_params(axis="y", colors="#BF360C")
+        self.ax_roc_r.tick_params(axis="y", colors="#BF360C")
+        # Initially hide them (no label when empty)
+        self.ax_main_r.set_visible(False)
+        self.ax_roc_r.set_visible(False)
+
         self.ax_main.set_title("Signals")
         self.ax_roc.set_title("Rate of Change")
 
@@ -226,12 +236,13 @@ class TrendViewer:
         self.coord_label = tk.Label(root, text="", anchor="w")
         self.coord_label.pack(fill="x")
 
-        # -------- Stats label at bottom --------
         self.stats_label = tk.Label(root, text="", anchor="w", bg="#f0f0f0", justify="left")
         self.stats_label.pack(fill="x")
 
-        self.ax_main.format_coord = lambda x, y: ""
-        self.ax_roc.format_coord  = lambda x, y: ""
+        self.ax_main.format_coord   = lambda x, y: ""
+        self.ax_roc.format_coord    = lambda x, y: ""
+        self.ax_main_r.format_coord = lambda x, y: ""
+        self.ax_roc_r.format_coord  = lambda x, y: ""
 
         # -------- Events --------
         self.canvas.mpl_connect("motion_notify_event", self.update_cursor)
@@ -242,20 +253,41 @@ class TrendViewer:
         self.canvas.mpl_connect("figure_leave_event", self.on_mouse_leave)
 
     # ================================================================
+    # HELPERS — which axes to use for a signal
+    # ================================================================
+    def _axes_for(self, name):
+        """Return (main_ax, roc_ax) for this signal depending on its side."""
+        if self.signal_side.get(name, "left") == "right":
+            return self.ax_main_r, self.ax_roc_r
+        return self.ax_main, self.ax_roc
+
+    def _update_secondary_visibility(self):
+        """Show/hide right-side axes based on whether any signal is on the right."""
+        has_right = any(v == "right" for v in self.signal_side.values()
+                        if v is not None)
+        # Only check active signals
+        has_right_active = any(
+            self.signal_side.get(s) == "right"
+            for s in self.signal_axis_map
+        )
+        self.ax_main_r.set_visible(has_right_active)
+        self.ax_roc_r.set_visible(has_right_active)
+
+    # ================================================================
     # SEARCH
     # ================================================================
     def _on_search_change(self, *_):
         query = self.search_var.get().strip().lower()
-        for name, btn in self.all_signal_buttons.items():
+        for name, widgets in self.all_signal_buttons.items():
+            frame = widgets["frame"]
             if query == "" or query in name.lower():
-                btn.grid()
+                frame.grid()
             else:
-                btn.grid_remove()
+                frame.grid_remove()
 
     # ================================================================
-    # AUTOCOMPLETE — expression entry
+    # AUTOCOMPLETE
     # ================================================================
-    # Built-in function tokens that should appear in suggestions
     _BUILTINS = [
         "abs(", "sqrt(", "log(", "log10(", "exp(",
         "sin(", "cos(", "tan(",
@@ -266,10 +298,8 @@ class TrendViewer:
     ]
 
     def _get_token_at_cursor(self):
-        """Return (prefix, start_pos) of the identifier/token being typed."""
         text = self.expr_entry.get()
         pos  = self.expr_entry.index(tk.INSERT)
-        # Walk left to find start of current word (alphanumeric / underscore / backtick)
         start = pos
         in_backtick = False
         for i in range(pos - 1, -1, -1):
@@ -286,27 +316,22 @@ class TrendViewer:
         return prefix, start, pos
 
     def _suggestions(self, prefix):
-        """Return sorted list of completions matching prefix (case-insensitive)."""
         if not prefix:
             return []
         pl = prefix.lstrip('`').lower()
         results = []
-        # Signal columns first
         if self.filtered_df is not None:
             for col in self.filtered_df.columns:
                 if col == "Time": continue
                 if col.lower().startswith(pl):
-                    # Wrap in backticks if name contains spaces / special chars
                     token = f"`{col}`" if not re.match(r"^\w+$", col) else col
                     results.append(("signal", token, col))
-        # Built-ins
         for b in self._BUILTINS:
             if b.lower().startswith(pl):
                 results.append(("builtin", b, b))
         return results
 
     def _on_expr_keyrelease(self, event):
-        # Don't re-trigger on navigation keys
         if event.keysym in ("Tab","Up","Down","Return","Escape","Left","Right"):
             return
         prefix, start, pos = self._get_token_at_cursor()
@@ -320,14 +345,12 @@ class TrendViewer:
             self._ac_hide()
 
     def _ac_show(self, suggestions):
-        """Create or refresh the autocomplete popup listbox."""
-        # Compute position below the expr_entry widget
         x = self.expr_entry.winfo_rootx()
         y = self.expr_entry.winfo_rooty() + self.expr_entry.winfo_height()
 
         if self._ac_win is None or not self._ac_win.winfo_exists():
             self._ac_win = tk.Toplevel(self.root)
-            self._ac_win.wm_overrideredirect(True)   # no title bar / border
+            self._ac_win.wm_overrideredirect(True)
             self._ac_win.wm_attributes("-topmost", True)
 
             frame = tk.Frame(self._ac_win, bd=1, relief="solid")
@@ -354,7 +377,6 @@ class TrendViewer:
             self._ac_lb.bind("<ButtonRelease-1>", self._ac_click)
             self._ac_lb.bind("<Return>",           self._ac_accept)
 
-        # Populate
         self._ac_lb.delete(0, "end")
         for kind, token, label in suggestions:
             icon = "⚡" if kind == "signal" else "ƒ"
@@ -390,7 +412,6 @@ class TrendViewer:
         return "break"
 
     def _ac_tab(self, event):
-        """Tab: accept the top/selected suggestion."""
         if self._ac_items:
             idx = self._ac_sel if self._ac_sel >= 0 else 0
             self._ac_accept_index(idx)
@@ -407,14 +428,12 @@ class TrendViewer:
         return "break"
 
     def _ac_accept_index(self, idx):
-        """Insert the chosen completion into the expression entry."""
         if idx < 0 or idx >= len(self._ac_items):
             return
         _, token, _ = self._ac_items[idx]
 
         text  = self.expr_entry.get()
         pos   = self.expr_entry.index(tk.INSERT)
-        # Find start of current token
         start = pos
         for i in range(pos - 1, -1, -1):
             ch = text[i]
@@ -456,14 +475,12 @@ class TrendViewer:
             messagebox.showerror("Shape mismatch", f"Result length {len(result)} != data length {len(self.filtered_df)}")
             return
 
-        # Store expression and inject into df
         self.derived_signals[name] = expr
         self.df[name] = np.nan
         self.df.loc[self.filtered_df.index, name] = result
         self.filtered_df = self.filtered_df.copy()
         self.filtered_df[name] = result
 
-        # Add button
         self._add_signal_button(name, derived=True)
         self.expr_var.set("")
         self.expr_name_var.set("")
@@ -527,6 +544,7 @@ class TrendViewer:
         self.last_loaded_file = path
         self.derived_signals.clear()
         self.all_signal_buttons.clear()
+        self.signal_side.clear()
 
         for w in self.signal_frame.winfo_children():
             w.destroy()
@@ -547,54 +565,107 @@ class TrendViewer:
                 self._add_signal_button(c)
 
     def _add_signal_button(self, name, derived=False):
-        max_per_row = 12
+        """Add a signal button row: [signal label] [L/R toggle]"""
+        max_per_row = 8  # slightly reduced to make room for axis toggle
         existing = list(self.all_signal_buttons.keys())
         idx = len(existing)
         row = idx // max_per_row
-        col = idx % max_per_row
+        col = (idx % max_per_row) * 2   # *2 because each signal uses 2 grid columns
+
+        # Default side is left
+        if name not in self.signal_side:
+            self.signal_side[name] = "left"
+
+        # Container frame for the pair
+        container = tk.Frame(self.signal_frame)
+        container.grid(row=row, column=col, columnspan=2, padx=2, pady=2, sticky="w")
 
         bg = "#E3F2FD" if derived else "white"
-        b = tk.Label(
-            self.signal_frame,
+        btn = tk.Label(
+            container,
             text=name,
             bg=bg,
             relief="raised",
             padx=6,
-            pady=3
+            pady=3,
         )
-        b.grid(row=row, column=col, padx=3, pady=3, sticky="w")
-        b.bind("<Button-1>", self.toggle_signal)
+        btn.pack(side="left")
+        btn.bind("<Button-1>", self.toggle_signal)
         if derived:
-            b.bind("<Button-3>", lambda e, n=name: self._remove_derived_signal(n))
+            btn.bind("<Button-3>", lambda e, n=name: self._remove_derived_signal(n))
 
-        self.all_signal_buttons[name] = b
+        # Axis-side toggle button
+        side_btn = tk.Label(
+            container,
+            text="L",
+            bg="#1565C0",
+            fg="white",
+            relief="raised",
+            padx=5,
+            pady=3,
+            font=("TkDefaultFont", 8, "bold"),
+            cursor="hand2",
+        )
+        side_btn.pack(side="left", padx=(1, 0))
+        side_btn.bind("<Button-1>", lambda e, n=name: self._toggle_signal_side(n))
+
+        self.all_signal_buttons[name] = {
+            "frame":    container,
+            "btn":      btn,
+            "side_btn": side_btn,
+        }
 
         # Re-apply search filter
         query = self.search_var.get().strip().lower()
         if query and query not in name.lower():
-            b.grid_remove()
+            container.grid_remove()
+
+    def _toggle_signal_side(self, name):
+        """Switch a signal between left and right Y-axis."""
+        current = self.signal_side.get(name, "left")
+        new_side = "right" if current == "left" else "left"
+        self.signal_side[name] = new_side
+
+        # Update button appearance
+        widgets = self.all_signal_buttons.get(name)
+        if widgets:
+            if new_side == "right":
+                widgets["side_btn"].config(text="R", bg="#BF360C")
+            else:
+                widgets["side_btn"].config(text="L", bg="#1565C0")
+
+        # If signal is currently active, redraw
+        if name in self.signal_axis_map:
+            self._redraw_signals()
+            self._update_secondary_visibility()
+            self.auto_adjust_yaxis()
+            self.update_stats_label()
+            self.canvas.draw_idle()
 
     def _remove_derived_signal(self, name):
         if name in self.signal_axis_map:
-            line, roc = self.signal_axis_map[name]
-            line.remove()
-            roc.remove()
             del self.signal_axis_map[name]
-            self.ax_main.legend()
-            self.ax_roc.legend()
+            self._update_legends()
             self.canvas.draw_idle()
 
-        if name in self.all_signal_buttons:
-            self.all_signal_buttons[name].destroy()
+        widgets = self.all_signal_buttons.get(name)
+        if widgets:
+            widgets["frame"].destroy()
             del self.all_signal_buttons[name]
 
         if name in self.derived_signals:
             del self.derived_signals[name]
+        if name in self.signal_side:
+            del self.signal_side[name]
 
-        if name in self.filtered_df.columns:
+        if self.filtered_df is not None and name in self.filtered_df.columns:
             self.filtered_df = self.filtered_df.drop(columns=[name])
-        if name in self.df.columns:
+        if self.df is not None and name in self.df.columns:
             self.df = self.df.drop(columns=[name])
+
+        self._redraw_signals()
+        self._update_secondary_visibility()
+        self.canvas.draw_idle()
 
     # ================================================================
     # FILTER
@@ -606,7 +677,6 @@ class TrendViewer:
         mask  = (self.df["Time"] >= start) & (self.df["Time"] <= end)
         self.filtered_df = self.df.loc[mask].copy()
 
-        # Re-evaluate derived signals on new filter window
         for name, expr in self.derived_signals.items():
             try:
                 result = evaluate_expression(expr, self.filtered_df)
@@ -622,15 +692,21 @@ class TrendViewer:
     def reset_plot(self):
         self.ax_main.clear()
         self.ax_roc.clear()
+        self.ax_main_r.clear()
+        self.ax_roc_r.clear()
         self.ax_main.set_title("Signals")
         self.ax_roc.set_title("Rate of Change")
+        self.ax_main_r.set_ylabel("Secondary axis", color="#BF360C", labelpad=2)
+        self.ax_roc_r.set_ylabel("ROC (right)", color="#BF360C", labelpad=2)
+        self.ax_main_r.tick_params(axis="y", colors="#BF360C")
+        self.ax_roc_r.tick_params(axis="y", colors="#BF360C")
         self.signal_axis_map.clear()
 
-        # Reset button appearances
-        for name, btn in self.all_signal_buttons.items():
+        for name, widgets in self.all_signal_buttons.items():
             is_derived = name in self.derived_signals
-            btn.config(relief="raised", bg="#E3F2FD" if is_derived else "white", fg="black")
+            widgets["btn"].config(relief="raised", bg="#E3F2FD" if is_derived else "white", fg="black")
 
+        self._update_secondary_visibility()
         self.vline_main = self.ax_main.axvline(0, color="gray", linestyle="--", visible=False)
         self.vline_roc  = self.ax_roc.axvline(0, color="gray", linestyle="--", visible=False)
         self.reset_x()
@@ -652,21 +728,31 @@ class TrendViewer:
             if s not in self.filtered_df.columns:
                 messagebox.showerror("Missing column", f"'{s}' not in current data.")
                 return
-            self.signal_axis_map[s] = None   # placeholder; drawn in _redraw_signals
+            self.signal_axis_map[s] = None
             w.config(relief="sunken", bg="#4CAF50", fg="white")
 
         self._redraw_signals()
+        self._update_secondary_visibility()
         self.auto_adjust_yaxis()
         self.update_stats_label()
         self.canvas.draw_idle()
 
     # ================================================================
-    # REDRAW SIGNALS — always samples from the visible x window
+    # LEGEND UPDATE
+    # ================================================================
+    def _update_legends(self):
+        """Rebuild legends on all four axes."""
+        for ax in (self.ax_main, self.ax_main_r, self.ax_roc, self.ax_roc_r):
+            lines, labels = ax.get_legend_handles_labels()
+            if lines:
+                ax.legend(fontsize=8, loc="upper left" if ax in (self.ax_main, self.ax_roc) else "upper right")
+            elif ax.get_legend():
+                ax.get_legend().remove()
+
+    # ================================================================
+    # REDRAW SIGNALS
     # ================================================================
     def _redraw_signals(self):
-        """Re-plot every active signal using only the points currently in
-        xlim, downsampled to max_points when needed.  Calling this on every
-        zoom/pan/reset means zooming in always reveals full-resolution data."""
         if self.filtered_df is None:
             return
 
@@ -675,47 +761,48 @@ class TrendViewer:
         v_mask = (t_num >= xlim[0]) & (t_num <= xlim[1])
         view   = self.filtered_df[v_mask]
 
-        # Stable colour assignment keyed by signal name
         prop_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
         all_names  = list(self.signal_axis_map.keys())
 
-        # Remove all existing signal lines (leave vlines and markers alone)
+        # Remove existing signal lines from ALL four axes
         keep = {self.vline_main, self.vline_roc}
-        for artist in list(self.ax_main.lines) + list(self.ax_roc.lines):
-            if artist not in keep:
-                try:
-                    artist.remove()
-                except Exception:
-                    pass
+        for ax in (self.ax_main, self.ax_main_r, self.ax_roc, self.ax_roc_r):
+            for artist in list(ax.lines):
+                if artist not in keep:
+                    try:
+                        artist.remove()
+                    except Exception:
+                        pass
 
         new_map = {}
         for i, s in enumerate(all_names):
             color = prop_cycle[i % len(prop_cycle)]
+            ax_m, ax_r = self._axes_for(s)
             n     = len(view)
+
             if n == 0:
-                line,     = self.ax_main.plot([], [], label=s, color=color)
-                roc_line, = self.ax_roc.plot([], [], linestyle="--", label=s, color=color)
+                line,     = ax_m.plot([], [], label=s, color=color)
+                roc_line, = ax_r.plot([], [], linestyle="--", label=s, color=color)
                 new_map[s] = (line, roc_line)
                 continue
 
             indices = downsample_indices(n)
             x_data  = view["Time"].iloc[indices]
             y_data  = view[s].iloc[indices]
-            line,   = self.ax_main.plot(x_data, y_data, label=s, color=color)
+            line,   = ax_m.plot(x_data, y_data, label=s, color=color)
 
             roc      = view[s].diff() / view["Time"].diff().dt.total_seconds()
             roc.iloc[0] = 0
             roc_ds   = roc.iloc[indices]
-            roc_line, = self.ax_roc.plot(x_data, roc_ds, linestyle="--", label=s, color=color)
+            roc_line, = ax_r.plot(x_data, roc_ds, linestyle="--", label=s, color=color)
 
             new_map[s] = (line, roc_line)
 
         self.signal_axis_map = new_map
-        self.ax_main.legend()
-        self.ax_roc.legend()
+        self._update_legends()
+        self._update_secondary_visibility()
 
     # ================================================================
-    # AUTO Y-AXIS    # ================================================================
     # AUTO Y-AXIS
     # ================================================================
     def auto_adjust_yaxis(self):
@@ -724,20 +811,29 @@ class TrendViewer:
         t_num = mdates.date2num(self.filtered_df["Time"].to_numpy())
         mask  = (t_num >= xlim[0]) & (t_num <= xlim[1])
 
-        all_vals = []
+        left_vals, right_vals   = [], []
+        left_roc,  right_roc    = [], []
+
         for s in self.signal_axis_map:
             vals = self.filtered_df[s][mask]
-            all_vals.extend(vals.dropna())
-        if all_vals:
-            self.ax_main.set_ylim(min(all_vals), max(all_vals))
-
-        all_roc = []
-        for s in self.signal_axis_map:
-            roc = self.filtered_df[s].diff() / self.filtered_df["Time"].diff().dt.total_seconds()
+            roc  = self.filtered_df[s].diff() / self.filtered_df["Time"].diff().dt.total_seconds()
             roc.iloc[0] = 0
-            all_roc.extend(roc[mask].dropna())
-        if all_roc:
-            self.ax_roc.set_ylim(min(all_roc), max(all_roc))
+
+            if self.signal_side.get(s, "left") == "right":
+                right_vals.extend(vals.dropna())
+                right_roc.extend(roc[mask].dropna())
+            else:
+                left_vals.extend(vals.dropna())
+                left_roc.extend(roc[mask].dropna())
+
+        if left_vals:
+            self.ax_main.set_ylim(min(left_vals), max(left_vals))
+        if right_vals:
+            self.ax_main_r.set_ylim(min(right_vals), max(right_vals))
+        if left_roc:
+            self.ax_roc.set_ylim(min(left_roc), max(left_roc))
+        if right_roc:
+            self.ax_roc_r.set_ylim(min(right_roc), max(right_roc))
 
     # ================================================================
     # CURSOR / HOVER
@@ -776,12 +872,13 @@ class TrendViewer:
         mask  = (times >= xlim[0]) & (times <= xlim[1])
 
         for s in self.signal_axis_map:
+            ax_m, ax_r = self._axes_for(s)
             y_val = self.filtered_df[s].iloc[idx]
             dt    = (self.filtered_df["Time"].iloc[idx] - self.filtered_df["Time"].iloc[idx - 1]).total_seconds()
             roc   = 0 if dt == 0 else (self.filtered_df[s].iloc[idx] - self.filtered_df[s].iloc[idx - 1]) / dt
 
-            m1, = self.ax_main.plot(self.filtered_df["Time"].iloc[idx], y_val, 'o', color="yellow", markersize=8, zorder=5)
-            m2, = self.ax_roc.plot(self.filtered_df["Time"].iloc[idx],  roc,   'o', color="yellow", markersize=8, zorder=5)
+            m1, = ax_m.plot(self.filtered_df["Time"].iloc[idx], y_val, 'o', color="yellow", markersize=8, zorder=5)
+            m2, = ax_r.plot(self.filtered_df["Time"].iloc[idx],  roc,   'o', color="yellow", markersize=8, zorder=5)
             self.highlight_markers.extend([m1, m2])
 
             vals  = self.filtered_df[s][mask]
@@ -789,9 +886,10 @@ class TrendViewer:
             vmax  = vals.max()
             vmean = vals.mean()
             vstd  = vals.std()
+            side_tag = "R" if self.signal_side.get(s, "left") == "right" else "L"
 
             tooltip_lines.append(
-                f"{s}:\nTime={self.filtered_df['Time'].iloc[idx]}\n"
+                f"{s} [{side_tag}]:\nTime={self.filtered_df['Time'].iloc[idx]}\n"
                 f"y={y_val:.4f}  ROC={roc:.4f}/s\n"
                 f"Min={vmin:.4f}  Max={vmax:.4f}  Mean={vmean:.4f}  Std={vstd:.4f}"
             )
@@ -836,8 +934,9 @@ class TrendViewer:
         for s in self.signal_axis_map:
             vals = self.filtered_df[s][mask]
             if len(vals) == 0: continue
+            side_tag = "[R]" if self.signal_side.get(s, "left") == "right" else "[L]"
             stats.append(
-                f"{s}: Min={vals.min():.4f}  Max={vals.max():.4f}  "
+                f"{s}{side_tag}: Min={vals.min():.4f}  Max={vals.max():.4f}  "
                 f"Mean={vals.mean():.4f}  Median={vals.median():.4f}  Std={vals.std():.4f}"
             )
 
@@ -864,7 +963,7 @@ class TrendViewer:
     def zoom(self, event):
         if self.filtered_df is None: return
         factor = 0.15
-        if event.inaxes == self.ax_main:
+        if event.inaxes in (self.ax_main, self.ax_main_r, self.ax_roc, self.ax_roc_r):
             x = event.xdata
             if x is None: return
             left, right = self.ax_main.get_xlim()
@@ -884,21 +983,19 @@ class TrendViewer:
         self.canvas.draw_idle()
 
     def start_pan(self, event):
-        """Left-click press — record start point for rubber-band zoom."""
-        if event.button == 1 and event.inaxes in (self.ax_main, self.ax_roc):
-            self._rb_press_x  = event.x        # pixel coords for threshold check
+        if event.button == 1 and event.inaxes in (self.ax_main, self.ax_roc,
+                                                   self.ax_main_r, self.ax_roc_r):
+            self._rb_press_x  = event.x
             self._rb_press_y  = event.y
-            self._rb_start_x  = event.xdata    # data coords
+            self._rb_start_x  = event.xdata
             self._rb_start_y  = event.ydata
             self._rb_start_ax = event.inaxes
-            self._rb_active   = False           # not yet committed as rubber-band
+            self._rb_active   = False
 
     def stop_pan(self, event):
-        """Left-click release — apply zoom if rubber-band was drawn."""
         if event.button != 1:
             return
 
-        # Remove rubber-band rectangles
         if self._rb_rect_main is not None:
             try: self._rb_rect_main.remove()
             except: pass
@@ -914,15 +1011,15 @@ class TrendViewer:
                 self.ax_main.set_xlim(x0, x1)
                 self.ax_roc.set_xlim(x0, x1)
 
-                # Y zoom only on whichever axes the drag started in
                 y0_raw = self._rb_start_y
                 y1_raw = event.ydata
                 if y0_raw is not None and y1_raw is not None and abs(y1_raw - y0_raw) > 1e-10:
                     ylo, yhi = sorted([y0_raw, y1_raw])
-                    if self._rb_start_ax == self.ax_main:
-                        self.ax_main.set_ylim(ylo, yhi)
-                    elif self._rb_start_ax == self.ax_roc:
-                        self.ax_roc.set_ylim(ylo, yhi)
+                    start_ax = self._rb_start_ax
+                    if start_ax in (self.ax_main, self.ax_main_r):
+                        start_ax.set_ylim(ylo, yhi)
+                    elif start_ax in (self.ax_roc, self.ax_roc_r):
+                        start_ax.set_ylim(ylo, yhi)
 
                 self.update_time_entries()
                 self._redraw_signals()
@@ -938,35 +1035,35 @@ class TrendViewer:
         self.canvas.draw_idle()
 
     def pan(self, event):
-        """Mouse motion — draw rubber-band rectangle while left-button held."""
         if self._rb_start_x is None or event.xdata is None:
             return
         if event.button != 1:
             return
 
-        # Commit to rubber-band mode once threshold exceeded
         if not self._rb_active:
             dx_px = abs(event.x - (self._rb_press_x or event.x))
             dy_px = abs(event.y - (self._rb_press_y or event.y))
             if dx_px < self._rb_MIN_PX and dy_px < self._rb_MIN_PX:
-                return   # still within click threshold — do nothing yet
+                return
             self._rb_active = True
 
-        # --- draw rubber-band on ax_main ---
         x0 = self._rb_start_x
         x1 = event.xdata
 
-        # For Y: clamp to the axes the drag started in; use full y-range on the other
         ylim_main = self.ax_main.get_ylim()
         ylim_roc  = self.ax_roc.get_ylim()
+        ylim_main_r = self.ax_main_r.get_ylim()
+        ylim_roc_r  = self.ax_roc_r.get_ylim()
 
-        if self._rb_start_ax == self.ax_main:
+        start_ax = self._rb_start_ax
+
+        if start_ax in (self.ax_main, self.ax_main_r):
             y0_main = self._rb_start_y
-            y1_main = event.ydata if event.inaxes == self.ax_main else ylim_main[1]
+            y1_main = event.ydata if event.inaxes in (self.ax_main, self.ax_main_r) else ylim_main[1]
             y0_roc, y1_roc = ylim_roc
         else:
             y0_roc  = self._rb_start_y
-            y1_roc  = event.ydata if event.inaxes == self.ax_roc else ylim_roc[1]
+            y1_roc  = event.ydata if event.inaxes in (self.ax_roc, self.ax_roc_r) else ylim_roc[1]
             y0_main, y1_main = ylim_main
 
         from matplotlib.patches import Rectangle
@@ -984,7 +1081,7 @@ class TrendViewer:
                 edgecolor="#1976D2",
                 facecolor="#90CAF9",
                 alpha=0.25,
-                linestyle=(0, (6, 3)),   # dashed
+                linestyle=(0, (6, 3)),
                 zorder=10,
             )
             ax.add_patch(rect)
@@ -1034,7 +1131,6 @@ class TrendViewer:
             messagebox.showwarning("No signals", "Select at least one signal to analyse.")
             return
 
-        # ---- get the currently visible x window ----
         xlim  = self.ax_main.get_xlim()
         t_num = mdates.date2num(self.filtered_df["Time"].to_numpy())
         mask  = (t_num >= xlim[0]) & (t_num <= xlim[1])
@@ -1044,12 +1140,10 @@ class TrendViewer:
             messagebox.showwarning("Too few points", "Zoom out — need at least 4 samples in view.")
             return
 
-        # ---- build window ----
         win = tk.Toplevel(self.root)
         win.title("FFT — Frequency Spectrum (zoomed view)")
         win.geometry("1050x700")
 
-        # Options bar
         opt_frame = tk.Frame(win)
         opt_frame.pack(fill="x", padx=8, pady=4)
 
@@ -1071,13 +1165,11 @@ class TrendViewer:
             tk.Radiobutton(opt_frame, text=y, variable=ymode_var, value=y,
                            command=lambda: _refresh()).pack(side="left", padx=3)
 
-        # Peak-count spinbox
         tk.Label(opt_frame, text="   Peaks:").pack(side="left")
         peak_var = tk.IntVar(value=5)
         tk.Spinbox(opt_frame, from_=0, to=20, width=3, textvariable=peak_var,
                    command=lambda: _refresh()).pack(side="left", padx=3)
 
-        # Export FFT button
         def _export_fft():
             path = filedialog.asksaveasfilename(
                 defaultextension=".csv",
@@ -1104,7 +1196,6 @@ class TrendViewer:
         tk.Button(opt_frame, text="Export FFT CSV", command=_export_fft,
                   bg="#388E3C", fg="white").pack(side="right", padx=6)
 
-        # ---- matplotlib figure inside the Toplevel ----
         n_sigs = len(self.signal_axis_map)
         fig_fft, axes = plt.subplots(
             n_sigs, 1,
@@ -1118,18 +1209,16 @@ class TrendViewer:
         toolbar_fft = NavigationToolbar2Tk(canvas_fft, win)
         toolbar_fft.update()
 
-        # Info label at bottom
         info_lbl = tk.Label(win, text="", anchor="w", bg="#EDE7F6", justify="left",
                             font=("Courier", 9))
         info_lbl.pack(fill="x", padx=4, pady=2)
 
-        # ---- window function map ----
         WINDOW_FN = {
             "none":     lambda n: np.ones(n),
             "hann":     np.hanning,
             "hamming":  np.hamming,
             "blackman": np.blackman,
-            "flattop":  lambda n: np.blackman(n),   # fallback; scipy not required
+            "flattop":  lambda n: np.blackman(n),
         }
         try:
             from scipy.signal.windows import flattop as _flattop
@@ -1154,30 +1243,25 @@ class TrendViewer:
                     continue
 
                 y = view_df[sig].to_numpy(dtype=float)
-                y = y - y.mean()          # remove DC offset
+                y = y - y.mean()
                 n = len(y)
 
-                # Estimate sample rate from median time delta
                 dt_arr = np.diff(
                     view_df["Time"].to_numpy().astype("datetime64[ns]")
-                ).astype(float) * 1e-9   # → seconds
+                ).astype(float) * 1e-9
                 dt_med = np.median(dt_arr) if len(dt_arr) else 1.0
                 if dt_med <= 0: dt_med = 1.0
                 fs = 1.0 / dt_med
 
-                # Apply window
                 window = wfn(n)
-                # Coherent gain correction so amplitude is physical
                 cg = window.mean()
                 y_win = y * window
 
-                # FFT
                 fft_vals = np.fft.rfft(y_win)
                 freqs    = np.fft.rfftfreq(n, d=1.0 / fs)
 
-                # Amplitude spectrum (peak-normalised by window coherent gain)
                 amp = np.abs(fft_vals) * 2 / (n * cg)
-                amp[0] /= 2  # DC bin is one-sided already
+                amp[0] /= 2
 
                 if ymode == "amplitude":
                     y_plot = amp
@@ -1185,33 +1269,28 @@ class TrendViewer:
                 elif ymode == "power":
                     y_plot = amp ** 2
                     ylabel = "Power"
-                else:  # dB
+                else:
                     y_plot = 20 * np.log10(np.maximum(amp, 1e-12))
                     ylabel = "Magnitude (dB)"
 
-                # Plot
                 ax.plot(freqs[1:], y_plot[1:], color="#7B1FA2", linewidth=1.0)
                 ax.fill_between(freqs[1:], y_plot[1:], alpha=0.15, color="#CE93D8")
                 ax.set_xlabel("Frequency (Hz)")
                 ax.set_ylabel(ylabel)
-                ax.set_title(sig)
                 ax.set_xscale(yscale)
                 if yscale == "log":
                     ax.set_xscale("log")
                 ax.grid(True, which="both", alpha=0.3)
 
-                # ---- dominant peaks annotation ----
                 if n_peaks > 0 and len(amp) > 2:
                     from scipy.signal import find_peaks as _fp
                     try:
                         peak_idx, props = _fp(amp[1:], height=amp[1:].max() * 0.05)
-                        peak_idx += 1   # offset for dc removal
+                        peak_idx += 1
                     except Exception:
-                        # fallback: argsort
                         peak_idx = np.argsort(amp[1:])[::-1][:n_peaks] + 1
                         props = {}
 
-                    # Sort by amplitude descending, take top n_peaks
                     peak_idx = sorted(peak_idx, key=lambda i: amp[i], reverse=True)[:n_peaks]
 
                     sig_info = [f"{sig}:"]
@@ -1233,9 +1312,8 @@ class TrendViewer:
                         )
                     info_parts.append("\n".join(sig_info))
 
-                # Duration / sample info as subtitle
                 t_span = (view_df["Time"].iloc[-1] - view_df["Time"].iloc[0]).total_seconds()
-                df_res  = fs / n   # frequency resolution
+                df_res  = fs / n
                 ax.set_title(
                     f"{sig}   [N={n}, fs≈{fs:.2f} Hz, Δf={df_res:.4f} Hz, "
                     f"span={t_span:.2f}s, window={wname}]",
@@ -1246,7 +1324,6 @@ class TrendViewer:
             canvas_fft.draw_idle()
             info_lbl.config(text="\n".join(info_parts) if info_parts else "")
 
-        # Initial render
         _refresh()
 
     # ================================================================
