@@ -1,81 +1,221 @@
-# Trend Viewer
+# TrendViewer
 
-This application allows you to visualize and analyze time-series data from CSV files. It provides features for:
-
-*   **Loading Data:** Drag and drop CSV files directly into the application.
-*   **Time Filtering:** Select specific date and time ranges to focus on.
-*   **Signal Visualization:** Plot multiple signals on primary and secondary Y-axes.
-*   **Rate of Change (ROC):** View the rate of change for each signal.
-*   **Derived Signals:** Create new signals by applying mathematical expressions to existing ones.
-*   **Zooming and Panning:** Interact with the plots to explore data in detail.
-*   **Statistics:** View min, max, mean, median, and standard deviation for selected signals within the current view.
-*   **Fourier Transform (FFT):** Analyze the frequency components of signals within the selected time range.
-*   **Exporting:** Save the filtered data as a CSV file and export FFT results.
-*   **Screenshots:** Capture the current plot as a PNG image.
-
-## Features
-
-### Data Loading
-
-Drag and drop a CSV file into the designated area. The file must contain a 'Time' column that can be parsed into datetime objects. Other columns will be treated as signals.
-
-### Time Controls
-
-*   **Start/End Date & Time:** Use the `DateEntry` widgets and time input fields to define the desired time window.
-*   **Apply:** Updates the displayed data based on the selected time range.
-*   **Export:** Saves the currently filtered data to a new CSV file.
-*   **Reset X:** Resets the X-axis to display the full time range of the loaded data.
-*   **FFT:** Opens a new window to perform a Fast Fourier Transform on the currently visible data.
-
-### Signal Management
-
-*   **Search:** Filter the list of available signals by typing in the search box.
-*   **Add New Signal:** Define new signals using mathematical expressions in the "New Signal =" field.
-    *   Wrap column names with spaces in backticks (e.g., `` `Column Name` ``).
-    *   Supported operators: `+`, `-`, `*`, `/`, `**` (power), `()`.
-    *   Supported functions: `abs`, `sqrt`, `log`, `log10`, `exp`, `sin`, `cos`, `tan`, `min`, `max`, `mean`, `std`, `diff`, `rolling_mean`, `rolling_std`, `cumsum`.
-    *   Constants: `pi`, `e`.
-    *   Press Enter in the expression or name field to add the signal.
-*   **Signal Buttons:** Click a signal's name to toggle its visibility on the plot. A sunken button indicates the signal is currently displayed.
-*   **Axis Toggle:** Click the `[L]` or `[R]` button next to a signal name to switch it between the left (primary) and right (secondary) Y-axis.
-*   **Remove Derived Signal:** Right-click on a derived signal's button to remove it.
-
-### Plot Interaction
-
-*   **Zoom:** Use the mouse scroll wheel while hovering over the plot to zoom in or out.
-*   **Pan:** Click and drag with the left mouse button to pan the plot. A rectangle will show the selected region.
-*   **Hover:** Moving the mouse cursor over the plot will display a tooltip with detailed information about the signals at that specific time point, including value, rate of change, min/max/mean/std within the view, and the Y-axis side.
-*   **Screenshot:** Press the `Print Screen` key to save the current plot as a PNG file in the same directory as the loaded CSV.
-
-### FFT Analysis
-
-The FFT window allows you to analyze the frequency content of the signals within the currently zoomed view.
-
-*   **Window:** Apply different windowing functions (none, Hann, Hamming, Blackman, Flattop) to reduce spectral leakage.
-*   **Scale:** Choose between linear or logarithmic scaling for the Y-axis.
-*   **Y-axis Mode:** Display the results as Amplitude, Power, or Magnitude in decibels (dB).
-*   **Peaks:** Highlight the top N most prominent frequency peaks.
-*   **Export FFT CSV:** Save the calculated frequency and amplitude data to a CSV file.
+A desktop time-series visualisation tool for CSV data. Load a file, select signals, zoom and pan interactively, overlay moving averages and standard deviations, build derived signals with formulas, and analyse frequency content with a built-in FFT.
 
 ## Requirements
 
-*   Python 3.7+
-*   `pandas`
-*   `matplotlib`
-*   `numpy`
-*   `tkinterdnd2`
-*   `tkcalendar`
+Python 3.8 or later. All dependencies are installed automatically on first run:
 
-The script will attempt to automatically install these dependencies if they are not found.
+| Package | Purpose |
+|---|---|
+| `pandas` | Data loading and time-series operations |
+| `matplotlib` | Plotting and interactive canvas |
+| `numpy` | Numerical computation |
+| `tkinterdnd2` | Drag-and-drop CSV loading |
+| `tkcalendar` | Date picker widgets |
 
-## Usage
+`scipy` is optional — used for improved FFT peak detection and the `flattop` window. The FFT works without it, falling back to NumPy.
 
-1.  Run the script: `python your_script_name.py`
-2.  Drag and drop a CSV file containing a 'Time' column and signal data into the application window.
-3.  Use the time controls to filter the data.
-4.  Click on signal names to display them on the plot.
-5.  Use the `[L]` / `[R]` buttons to assign signals to the left or right Y-axis.
-6.  Interact with the plot using the mouse for zooming and panning.
-7.  Create derived signals using the expression builder.
-8.  Click the "FFT" button to analyze frequency components.
+## Running
+
+```bash
+python trendviewer.py
 ```
+
+## CSV Format
+
+The file must have a `Time` column parseable by `pandas.to_datetime`. All other columns are treated as numeric signals. Timezone-aware timestamps are converted to local time on load.
+
+```
+Time,Temperature,Pressure,FlowRate
+2024-01-15 08:00:00,22.3,1013.2,4.7
+2024-01-15 08:00:01,22.4,1013.1,4.8
+...
+```
+
+---
+
+## Interface Overview
+
+### Loading Data
+
+Drag a CSV file onto the **"Drag CSV here"** bar at the top, or modify the script to call `load_csv(path)` directly. The time range pickers are set automatically to the full extent of the data.
+
+### Time Range Filter
+
+Use the **Start** and **End** date/time pickers to narrow the visible time window, then click **Apply**. Currently active signals stay selected across filter changes. **Reset X** restores the full x-axis range without reloading.
+
+**Export** saves the currently filtered data slice to a new CSV.
+
+---
+
+## Signals Panel
+
+Every column in the CSV appears as a button in the **Signals** panel.
+
+| Action | Gesture |
+|---|---|
+| Toggle signal on/off | Left-click the signal name button |
+| Switch axis (Left ↔ Right) | Left-click the **[L]** / **[R]** button beside the signal name |
+| Remove a derived / MA / MSD signal | Right-click the signal name button |
+
+Active signals turn green. The **[L]** button is blue; **[R]** is red. The axis key legend below the MA/MSD row shows which is which.
+
+**Search** — type in the Search box to filter the Signals panel in real time. Only buttons whose names contain the search text remain visible.
+
+### Dual Y-Axis
+
+Any signal can be assigned to the primary (left) or secondary (right) y-axis independently. The secondary axis is hidden until at least one signal is assigned to it.
+
+---
+
+## Moving Average and Moving Std Dev
+
+The combined **Moving Avg / Moving Std** row lets you add rolling overlays on top of any signal.
+
+### Controls (same layout for both halves)
+
+| Control | Description |
+|---|---|
+| Signal entry | Searchable — type to filter, ↑↓ to navigate, Enter or click to select |
+| **Win** d / h / m | Window duration in days, hours, and minutes |
+| Summary badge | Shows the total window duration (e.g. `= 1d 6h`) |
+| **Add MA** / **Add MSD** | Computes the overlay and adds it to the Signals panel |
+
+The window is converted to a row count using the median sample interval of the loaded data, so the same duration works correctly regardless of sample rate.
+
+### In the Signals Panel
+
+MA and MSD overlays appear as coloured buttons in the Signals panel, identical to regular signals:
+
+- **Toggle on/off** by clicking the button
+- **Switch axis** with the [L]/[R] button
+- **Remove** with right-click
+
+**Chart style** — MA lines are long-dashed; MSD lines are short-dotted. Both use a fixed colour from a preset palette that cycles if more than eight overlays are added.
+
+---
+
+## Derived Signals
+
+The **New Signal** row lets you compute custom signals from existing columns using an arithmetic expression.
+
+### Syntax
+
+```
+expression   Name: my_signal   [Add]
+```
+
+- Column names are used directly: `Temperature`, `Pressure`
+- Names containing spaces must be wrapped in backticks: `` `Oil Temp` ``
+- Operators: `+ - * / ** ( )`
+- The result is added as a new button in the Signals panel and persists across time filter changes
+
+### Autocomplete
+
+While typing in the expression box, a dropdown suggests matching column names and built-in functions. Navigate with ↑↓, accept with Tab or Enter.
+
+### Available Functions
+
+**Math**
+
+| Function | Description |
+|---|---|
+| `abs(x)` | Absolute value |
+| `sqrt(x)` | Square root |
+| `log(x)` | Natural logarithm |
+| `log10(x)` | Base-10 logarithm |
+| `exp(x)` | Exponential |
+| `sin(x)` `cos(x)` `tan(x)` | Trigonometric |
+| `pi` `e` | Constants |
+
+**Statistical**
+
+| Function | Description |
+|---|---|
+| `mean(x)` | Mean of the entire series |
+| `std(x)` | Standard deviation of the entire series |
+| `min(x, y)` `max(x, y)` | Element-wise min/max of two arrays |
+
+**Series (return an array)**
+
+| Function | Description |
+|---|---|
+| `diff(x)` | Row-by-row difference |
+| `rolling_mean(x, N)` | N-point rolling mean |
+| `rolling_std(x, N)` | N-point rolling standard deviation |
+| `cumsum(x)` | Cumulative sum |
+
+### Examples
+
+```
+# Difference between two channels
+Temperature - `Setpoint Temp`
+
+# Normalised (z-score)
+(Pressure - mean(Pressure)) / std(Pressure)
+
+# 10-sample smoothed flow
+rolling_mean(FlowRate, 10)
+
+# Power from voltage and current
+Voltage * Current
+
+# Rate of change approximation
+diff(Temperature) / diff(Time)   ← use the ROC subplot instead
+```
+
+---
+
+## Chart Interaction
+
+### Navigation
+
+| Action | Gesture |
+|---|---|
+| Zoom in / out on x-axis | Scroll wheel |
+| Rubber-band zoom (x and/or y) | Click and drag |
+| Reset x-axis to full range | **Reset X** button |
+
+Rubber-band zoom: drag a rectangle to zoom both axes simultaneously. If you drag only horizontally (no vertical movement), the y-axis auto-adjusts to the data in the new view. If you include a vertical drag, the y-axis is set to exactly the height you drew.
+
+### Cursor and Tooltip
+
+Moving the mouse over the chart:
+
+- A vertical crosshair tracks the cursor across both the main plot and the ROC subplot
+- A tooltip shows the current value, rate of change, and visible-range statistics (min, max, mean, std) for every active signal
+- Yellow dots mark the nearest data point on each active signal
+
+### Stats Bar
+
+The bar below the chart permanently shows min, max, mean, median, and std for every active signal within the current x-axis view.
+
+### Rate of Change (ROC) Subplot
+
+The lower subplot shows the per-second derivative of every active signal, computed as `Δvalue / Δtime`. It shares the x-axis with the main plot and zooms together.
+
+---
+
+## FFT Analysis
+
+Click the purple **FFT** button to open a frequency-domain analysis window for all currently active signals within the current x-axis view.
+
+### Controls
+
+| Control | Options |
+|---|---|
+| Window function | none, hann, hamming, blackman, flattop |
+| X scale | linear, log |
+| Y mode | amplitude, power, dB |
+| Peaks | Number of dominant peaks to annotate (0 to disable) |
+
+The title of each subplot shows the signal name, sample count, estimated sample rate, frequency resolution, time span, and window function used.
+
+**Export FFT CSV** saves frequency, amplitude, and period for all active signals to a file.
+
+---
+
+## Screenshot
+
+Press the **Print Screen** key while the app is focused to save a 300 dpi PNG of the current chart to the same folder as the loaded CSV file. The filename includes a timestamp: `trend_capture_YYYYMMDD_HHMMSS.png`.
