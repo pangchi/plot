@@ -100,6 +100,17 @@ class TrendViewer:
         self.derived_signals = {}
         self.all_signal_buttons = {}
 
+        # MA overlay state
+        self.ma_overlays = {}          # key: (signal_name, window_seconds) -> colour
+        self._ma_overlays_by_name = {} # key: ma_label -> {key, color, sig, window_secs, kind}
+        self._ma_colors  = ["#1B8A1B","#0D5FA8","#B06000","#6A0080","#00777A",
+                            "#4E342E","#1565C0","#2E7D32"]
+
+        self.msd_overlays = {}          # key: (signal_name, window_seconds) -> colour
+        self._msd_overlays_by_name = {} # key: msd_label -> {key, color, sig, window_secs, kind}
+        self._msd_colors = ["#D84315","#6A1B9A","#00695C","#AD1457","#283593",
+                            "#558B2F","#F57F17","#4E342E"]
+
         # rubber-band zoom state
         self._rb_active    = False
         self._rb_press_x   = None
@@ -177,9 +188,137 @@ class TrendViewer:
         tk.Button(sf, text="Add", command=self._add_derived_signal, bg="#2196F3", fg="white").pack(side="left", padx=4)
         tk.Button(sf, text="?", command=self._show_expr_help, width=2).pack(side="left")
 
-        # -------- Legend for Y-axis side indicator --------
+        # -------- Moving Average + Moving Std Dev (single combined row) --------
+        masd_row = tk.Frame(root, bd=1, relief="solid")
+        masd_row.pack(fill="x", padx=4, pady=(2, 0))
+
+        # ── Left half: Moving Average ──
+        ma_f = tk.Frame(masd_row, bg="#E8F5E9")
+        ma_f.pack(side="left", fill="y", padx=0)
+
+        tk.Label(ma_f, text="Moving Avg:", bg="#E8F5E9",
+                 font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(6, 4))
+        tk.Label(ma_f, text="Signal:", bg="#E8F5E9").pack(side="left")
+
+        self.ma_signal_var = tk.StringVar()
+        self.ma_signal_var.trace_add("write", self._on_ma_search_change)
+        self._ma_all_signals = []
+
+        ma_entry_frame = tk.Frame(ma_f, bg="#E8F5E9")
+        ma_entry_frame.pack(side="left", padx=(2, 6))
+        self.ma_signal_entry = tk.Entry(ma_entry_frame, textvariable=self.ma_signal_var, width=18)
+        self.ma_signal_entry.pack()
+        self.ma_signal_entry.bind("<KeyRelease>", self._on_ma_entry_key)
+        self.ma_signal_entry.bind("<Down>",       self._ma_dd_down)
+        self.ma_signal_entry.bind("<Up>",         self._ma_dd_up)
+        self.ma_signal_entry.bind("<Return>",     self._ma_dd_accept)
+        self.ma_signal_entry.bind("<Escape>",     lambda e: self._ma_dd_hide())
+        self.ma_signal_entry.bind("<FocusOut>",   lambda e: self.root.after(150, self._ma_dd_hide))
+
+        self._ma_dd_win  = None
+        self._ma_dd_lb   = None
+        self._ma_dd_sel  = -1
+        self._ma_dd_items = []
+
+        tk.Label(ma_f, text="Win:", bg="#E8F5E9").pack(side="left")
+        self.ma_days_var = tk.IntVar(value=0)
+        tk.Spinbox(ma_f, from_=0, to=3650, width=4,
+                   textvariable=self.ma_days_var,
+                   command=self._update_ma_window_label).pack(side="left", padx=(2, 0))
+        tk.Label(ma_f, text="d", bg="#E8F5E9", font=("TkDefaultFont", 8)).pack(side="left", padx=(1, 4))
+
+        self.ma_hours_var = tk.IntVar(value=1)
+        tk.Spinbox(ma_f, from_=0, to=23, width=3,
+                   textvariable=self.ma_hours_var,
+                   command=self._update_ma_window_label).pack(side="left", padx=(2, 0))
+        tk.Label(ma_f, text="h", bg="#E8F5E9", font=("TkDefaultFont", 8)).pack(side="left", padx=(1, 4))
+
+        self.ma_mins_var = tk.IntVar(value=0)
+        tk.Spinbox(ma_f, from_=0, to=59, width=3,
+                   textvariable=self.ma_mins_var,
+                   command=self._update_ma_window_label).pack(side="left", padx=(2, 0))
+        tk.Label(ma_f, text="m", bg="#E8F5E9", font=("TkDefaultFont", 8)).pack(side="left", padx=(1, 4))
+
+        self.ma_window_summary = tk.Label(ma_f, text="= 1h",
+                                           bg="#C8E6C9", fg="#1B5E20",
+                                           font=("TkDefaultFont", 8, "bold"),
+                                           padx=4, relief="groove")
+        self.ma_window_summary.pack(side="left", padx=(0, 4))
+
+        self.ma_days_var.trace_add("write",  lambda *_: self._update_ma_window_label())
+        self.ma_hours_var.trace_add("write", lambda *_: self._update_ma_window_label())
+        self.ma_mins_var.trace_add("write",  lambda *_: self._update_ma_window_label())
+
+        tk.Button(ma_f, text="Add MA", command=self._add_ma,
+                  bg="#2E7D32", fg="white",
+                  font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(2, 6))
+
+        # ── Vertical divider ──
+        tk.Frame(masd_row, width=2, bg="#BDBDBD").pack(side="left", fill="y", padx=2)
+
+        # ── Right half: Moving Std Dev ──
+        msd_f = tk.Frame(masd_row, bg="#FFF3E0")
+        msd_f.pack(side="left", fill="y", padx=0)
+
+        tk.Label(msd_f, text="Moving Std:", bg="#FFF3E0",
+                 font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(6, 4))
+        tk.Label(msd_f, text="Signal:", bg="#FFF3E0").pack(side="left")
+
+        self.msd_signal_var = tk.StringVar()
+        self.msd_signal_var.trace_add("write", self._on_msd_search_change)
+
+        msd_entry_frame = tk.Frame(msd_f, bg="#FFF3E0")
+        msd_entry_frame.pack(side="left", padx=(2, 6))
+        self.msd_signal_entry = tk.Entry(msd_entry_frame, textvariable=self.msd_signal_var, width=18)
+        self.msd_signal_entry.pack()
+        self.msd_signal_entry.bind("<KeyRelease>", self._on_msd_entry_key)
+        self.msd_signal_entry.bind("<Down>",       self._msd_dd_down)
+        self.msd_signal_entry.bind("<Up>",         self._msd_dd_up)
+        self.msd_signal_entry.bind("<Return>",     self._msd_dd_accept)
+        self.msd_signal_entry.bind("<Escape>",     lambda e: self._msd_dd_hide())
+        self.msd_signal_entry.bind("<FocusOut>",   lambda e: self.root.after(150, self._msd_dd_hide))
+
+        self._msd_dd_win  = None
+        self._msd_dd_lb   = None
+        self._msd_dd_sel  = -1
+        self._msd_dd_items = []
+
+        tk.Label(msd_f, text="Win:", bg="#FFF3E0").pack(side="left")
+        self.msd_days_var = tk.IntVar(value=0)
+        tk.Spinbox(msd_f, from_=0, to=3650, width=4,
+                   textvariable=self.msd_days_var,
+                   command=self._update_msd_window_label).pack(side="left", padx=(2, 0))
+        tk.Label(msd_f, text="d", bg="#FFF3E0", font=("TkDefaultFont", 8)).pack(side="left", padx=(1, 4))
+
+        self.msd_hours_var = tk.IntVar(value=1)
+        tk.Spinbox(msd_f, from_=0, to=23, width=3,
+                   textvariable=self.msd_hours_var,
+                   command=self._update_msd_window_label).pack(side="left", padx=(2, 0))
+        tk.Label(msd_f, text="h", bg="#FFF3E0", font=("TkDefaultFont", 8)).pack(side="left", padx=(1, 4))
+
+        self.msd_mins_var = tk.IntVar(value=0)
+        tk.Spinbox(msd_f, from_=0, to=59, width=3,
+                   textvariable=self.msd_mins_var,
+                   command=self._update_msd_window_label).pack(side="left", padx=(2, 0))
+        tk.Label(msd_f, text="m", bg="#FFF3E0", font=("TkDefaultFont", 8)).pack(side="left", padx=(1, 4))
+
+        self.msd_window_summary = tk.Label(msd_f, text="= 1h",
+                                            bg="#FFE0B2", fg="#E65100",
+                                            font=("TkDefaultFont", 8, "bold"),
+                                            padx=4, relief="groove")
+        self.msd_window_summary.pack(side="left", padx=(0, 4))
+
+        self.msd_days_var.trace_add("write",  lambda *_: self._update_msd_window_label())
+        self.msd_hours_var.trace_add("write", lambda *_: self._update_msd_window_label())
+        self.msd_mins_var.trace_add("write",  lambda *_: self._update_msd_window_label())
+
+        tk.Button(msd_f, text="Add MSD", command=self._add_msd,
+                  bg="#E65100", fg="white",
+                  font=("TkDefaultFont", 9, "bold")).pack(side="left", padx=(2, 6))
+
+        # -------- Axis key legend (below combined MA/MSD row) --------
         legend_f = tk.Frame(root, bg="#F5F5F5", bd=1, relief="solid")
-        legend_f.pack(fill="x", padx=4, pady=1)
+        legend_f.pack(fill="x", padx=4, pady=(0, 2))
         tk.Label(legend_f, text="Axis key:", bg="#F5F5F5", font=("TkDefaultFont", 8)).pack(side="left", padx=4)
         tk.Label(legend_f, text="[L]", bg="#1565C0", fg="white",
                  font=("TkDefaultFont", 8, "bold"), padx=4).pack(side="left", padx=2)
@@ -474,6 +613,8 @@ class TrendViewer:
         self.filtered_df[name] = result
 
         self._add_signal_button(name, derived=True)
+        self._refresh_ma_signal_list()
+        self._refresh_msd_signal_list()
         self.expr_var.set("")
         self.expr_name_var.set("")
 
@@ -537,6 +678,10 @@ class TrendViewer:
         self.derived_signals.clear()
         self.all_signal_buttons.clear()
         self.signal_side.clear()
+        self.ma_overlays.clear()
+        self._ma_overlays_by_name.clear()
+        self.msd_overlays.clear()
+        self._msd_overlays_by_name.clear()
 
         for w in self.signal_frame.winfo_children():
             w.destroy()
@@ -555,6 +700,9 @@ class TrendViewer:
         for c in self.df.columns:
             if c != "Time":
                 self._add_signal_button(c)
+
+        self._refresh_ma_signal_list()
+        self._refresh_msd_signal_list()
 
     def _add_signal_button(self, name, derived=False):
         max_per_row = 8
@@ -649,6 +797,8 @@ class TrendViewer:
 
         self._redraw_signals()
         self._update_secondary_visibility()
+        self._refresh_ma_signal_list()
+        self._refresh_msd_signal_list()
         self.canvas.draw_idle()
 
     # ================================================================
@@ -668,7 +818,61 @@ class TrendViewer:
             except Exception:
                 pass
 
+        # Recompute MA virtual columns into the new filtered_df slice
+        for ma_name, info in self._ma_overlays_by_name.items():
+            sig, window_secs = info["sig"], info["window_secs"]
+            if sig not in self.filtered_df.columns:
+                continue
+            window_rows = self._seconds_to_rows(window_secs)
+            self.filtered_df[ma_name] = (
+                self.filtered_df[sig]
+                .rolling(window=window_rows, min_periods=1)
+                .mean()
+                .values
+            )
+
+        # Recompute MSD virtual columns into the new filtered_df slice
+        for msd_name, info in self._msd_overlays_by_name.items():
+            sig, window_secs = info["sig"], info["window_secs"]
+            if sig not in self.filtered_df.columns:
+                continue
+            window_rows = self._seconds_to_rows(window_secs)
+            self.filtered_df[msd_name] = (
+                self.filtered_df[sig]
+                .rolling(window=window_rows, min_periods=2)
+                .std()
+                .fillna(0)
+                .values
+            )
+
+        # Preserve which signals were active before the reset
+        previously_active = set(self.signal_axis_map.keys())
         self.reset_plot()
+
+        # Re-select the previously active signals
+        for name in previously_active:
+            if name not in self.filtered_df.columns:
+                continue
+            self.signal_axis_map[name] = None
+            widgets = self.all_signal_buttons.get(name)
+            if widgets:
+                overlay_info = (self._ma_overlays_by_name.get(name)
+                                or self._msd_overlays_by_name.get(name))
+                if overlay_info:
+                    widgets["btn"].config(relief="sunken", bg=overlay_info["color"],
+                                         fg="white")
+                else:
+                    widgets["btn"].config(relief="sunken", bg="#4CAF50", fg="white")
+
+        if previously_active:
+            self._redraw_signals()
+            self._update_secondary_visibility()
+            self.auto_adjust_yaxis()
+            self.update_stats_label()
+            self.canvas.draw_idle()
+
+        self._refresh_ma_signal_list()
+        self._refresh_msd_signal_list()
 
     # ================================================================
     # RESET PLOT
@@ -687,8 +891,14 @@ class TrendViewer:
         self.signal_axis_map.clear()
 
         for name, widgets in self.all_signal_buttons.items():
-            is_derived = name in self.derived_signals
-            widgets["btn"].config(relief="raised", bg="#E3F2FD" if is_derived else "white", fg="black")
+            if widgets.get("is_ma"):
+                overlay_info = (self._ma_overlays_by_name.get(name)
+                                or self._msd_overlays_by_name.get(name, {}))
+                color = overlay_info.get("color", "#888888")
+                widgets["btn"].config(relief="raised", bg=color, fg="white")
+            else:
+                is_derived = name in self.derived_signals
+                widgets["btn"].config(relief="raised", bg="#E3F2FD" if is_derived else "white", fg="black")
 
         self._update_secondary_visibility()
         self.vline_main = self.ax_main.axvline(0, color="gray", linestyle="--", visible=False)
@@ -706,14 +916,24 @@ class TrendViewer:
 
         if s in self.signal_axis_map:
             del self.signal_axis_map[s]
-            is_derived = s in self.derived_signals
-            w.config(relief="raised", bg="#E3F2FD" if is_derived else "white", fg="black")
+            overlay_info = (self._ma_overlays_by_name.get(s)
+                            or self._msd_overlays_by_name.get(s))
+            if overlay_info:
+                w.config(relief="raised", bg=overlay_info["color"], fg="white")
+            else:
+                is_derived = s in self.derived_signals
+                w.config(relief="raised", bg="#E3F2FD" if is_derived else "white", fg="black")
         else:
             if s not in self.filtered_df.columns:
                 messagebox.showerror("Missing column", f"'{s}' not in current data.")
                 return
             self.signal_axis_map[s] = None
-            w.config(relief="sunken", bg="#4CAF50", fg="white")
+            overlay_info = (self._ma_overlays_by_name.get(s)
+                            or self._msd_overlays_by_name.get(s))
+            if overlay_info:
+                w.config(relief="sunken", bg=overlay_info["color"], fg="white")
+            else:
+                w.config(relief="sunken", bg="#4CAF50", fg="white")
 
         self._redraw_signals()
         self._update_secondary_visibility()
@@ -733,7 +953,7 @@ class TrendViewer:
                 ax.get_legend().remove()
 
     # ================================================================
-    # REDRAW SIGNALS  (FIX: use get_lines() to avoid mutation bug)
+    # REDRAW SIGNALS
     # ================================================================
     def _redraw_signals(self):
         if self.filtered_df is None:
@@ -747,8 +967,7 @@ class TrendViewer:
         prop_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
         all_names  = list(self.signal_axis_map.keys())
 
-        # FIX: protect vlines on all axes; use get_lines() (returns a copy) to
-        # avoid skipping artists when removing during iteration
+        # Protect vlines; use get_lines() (returns a copy) to avoid mutation bug
         keep = {self.vline_main, self.vline_roc}
         for ax in (self.ax_main, self.ax_main_r, self.ax_roc, self.ax_roc_r):
             for artist in ax.get_lines():
@@ -760,11 +979,17 @@ class TrendViewer:
 
         new_map = {}
         for i, s in enumerate(all_names):
-            color = prop_cycle[i % len(prop_cycle)]
+            # MA / MSD virtual columns use a fixed colour from their lookup dicts
+            ma_info  = self._ma_overlays_by_name.get(s)
+            msd_info = self._msd_overlays_by_name.get(s)
+            overlay_info = ma_info or msd_info
+            color = overlay_info["color"] if overlay_info else prop_cycle[i % len(prop_cycle)]
             ax_m, ax_r = self._axes_for(s)
             n     = len(view)
 
-            if n == 0:
+            col = s   # both regular and MA virtual columns exist in filtered_df
+
+            if n == 0 or col not in view.columns:
                 line,     = ax_m.plot([], [], label=s, color=color)
                 roc_line, = ax_r.plot([], [], linestyle="--", label=s, color=color)
                 new_map[s] = (line, roc_line)
@@ -772,10 +997,14 @@ class TrendViewer:
 
             indices = downsample_indices(n)
             x_data  = view["Time"].iloc[indices]
-            y_data  = view[s].iloc[indices]
-            line,   = ax_m.plot(x_data, y_data, label=s, color=color)
+            y_data  = view[col].iloc[indices]
 
-            roc      = view[s].diff() / view["Time"].diff().dt.total_seconds()
+            lw      = 2.0 if overlay_info else 1.5
+            ls      = (0, (6, 2)) if ma_info else ((0, (2, 2)) if msd_info else "solid")
+            line,   = ax_m.plot(x_data, y_data, label=s, color=color,
+                                linewidth=lw, linestyle=ls)
+
+            roc      = view[col].diff() / view["Time"].diff().dt.total_seconds()
             roc.iloc[0] = 0
             roc_ds   = roc.iloc[indices]
             roc_line, = ax_r.plot(x_data, roc_ds, linestyle="--", label=s, color=color)
@@ -820,7 +1049,7 @@ class TrendViewer:
             self.ax_roc_r.set_ylim(min(right_roc), max(right_roc))
 
     # ================================================================
-    # CURSOR / HOVER  (FIX: annotation_clip=False + correct axis host)
+    # CURSOR / HOVER
     # ================================================================
     def update_cursor(self, event):
         if not event.inaxes or self.filtered_df is None:
@@ -887,8 +1116,6 @@ class TrendViewer:
                 f"Min={vmin:.4f}  Max={vmax:.4f}  Mean={vmean:.4f}  Std={vstd:.4f}"
             )
 
-            # Track the last left-axis signal for annotation anchor
-            # (always anchor on ax_main so transform is consistent)
             if self.signal_side.get(s, "left") == "left":
                 last_ann_y   = y_val
                 last_ann_sig = s
@@ -900,8 +1127,6 @@ class TrendViewer:
             if event.x > figw * 0.7: offx = -150
             if event.y > figh * 0.7: offy = -80
 
-            # FIX: always annotate on ax_main; fall back to first signal value
-            # if no left-axis signal is active
             if last_ann_y is None:
                 last_ann_sig = list(self.signal_axis_map.keys())[0]
                 last_ann_y   = self.filtered_df[last_ann_sig].iloc[idx]
@@ -915,7 +1140,7 @@ class TrendViewer:
                 textcoords="offset points",
                 bbox=dict(boxstyle="round", fc="yellow", alpha=0.9),
                 arrowprops=dict(arrowstyle="->"),
-                annotation_clip=False,   # FIX: don't clip when anchor near edge
+                annotation_clip=False,
                 zorder=20,
             )
             self.coord_label.config(text=f"(x={x_str})")
@@ -1036,8 +1261,6 @@ class TrendViewer:
                 self._redraw_signals()
 
                 if y_zoomed:
-                    # FIX: apply the Y zoom the user drew; skip auto_adjust so
-                    # it doesn't overwrite the explicit Y range
                     ylo, yhi = sorted([y0_raw, y1_raw])
                     start_ax = self._rb_start_ax
                     if start_ax in (self.ax_main, self.ax_main_r):
@@ -1045,7 +1268,6 @@ class TrendViewer:
                     elif start_ax in (self.ax_roc, self.ax_roc_r):
                         start_ax.set_ylim(ylo, yhi)
                 else:
-                    # No Y drag — let auto_adjust fit the data
                     self.auto_adjust_yaxis()
 
                 self.update_stats_label()
@@ -1141,6 +1363,490 @@ class TrendViewer:
         self.auto_adjust_yaxis()
         self.update_stats_label()
         self.canvas.draw_idle()
+
+    # ================================================================
+    # MOVING AVERAGE
+    # ================================================================
+    def _ma_window_seconds(self):
+        """Return total MA window size in seconds from the three spinboxes."""
+        try: days  = int(self.ma_days_var.get())
+        except: days = 0
+        try: hours = int(self.ma_hours_var.get())
+        except: hours = 0
+        try: mins  = int(self.ma_mins_var.get())
+        except: mins = 0
+        return days * 86_400 + hours * 3_600 + mins * 60
+
+    def _update_ma_window_label(self, *_):
+        """Refresh the summary badge showing the total window duration."""
+        try:
+            secs = self._ma_window_seconds()
+        except Exception:
+            return
+        if secs <= 0:
+            self.ma_window_summary.config(text="= 0s")
+            return
+        d, rem = divmod(secs, 86_400)
+        h, rem = divmod(rem,  3_600)
+        m, s   = divmod(rem,  60)
+        parts = []
+        if d: parts.append(f"{d}d")
+        if h: parts.append(f"{h}h")
+        if m: parts.append(f"{m}m")
+        if s: parts.append(f"{s}s")
+        self.ma_window_summary.config(text="= " + " ".join(parts))
+
+    def _seconds_to_rows(self, window_secs):
+        """Convert a duration in seconds to an approximate row count."""
+        if self.filtered_df is None or len(self.filtered_df) < 2:
+            return max(1, int(window_secs))
+        dt_arr = np.diff(
+            self.filtered_df["Time"].to_numpy().astype("datetime64[ns]")
+        ).astype(float) * 1e-9          # → seconds
+        dt_med = float(np.median(dt_arr))
+        if dt_med <= 0:
+            return max(1, int(window_secs))
+        rows = max(1, round(window_secs / dt_med))
+        return rows
+
+    def _ma_label(self, sig, window_secs):
+        """Human-readable label for an MA overlay."""
+        d, rem = divmod(int(window_secs), 86_400)
+        h, rem = divmod(rem, 3_600)
+        m, _   = divmod(rem, 60)
+        parts = []
+        if d: parts.append(f"{d}d")
+        if h: parts.append(f"{h}h")
+        if m: parts.append(f"{m}m")
+        duration = "".join(parts) or f"{int(window_secs)}s"
+        return f"MA{duration}({sig})"
+
+    # ================================================================
+    # MA SEARCHABLE DROPDOWN
+    # ================================================================
+    def _on_ma_search_change(self, *_):
+        """Trace callback — only fires from programmatic set; key events handled separately."""
+        pass
+
+    def _on_ma_entry_key(self, event):
+        if event.keysym in ("Return", "Escape", "Up", "Down", "Tab"):
+            return
+        query = self.ma_signal_var.get().strip().lower()
+        filtered = [s for s in self._ma_all_signals if query in s.lower()]
+        if filtered:
+            self._ma_dd_items = filtered
+            self._ma_dd_show(filtered)
+        else:
+            self._ma_dd_hide()
+
+    def _ma_dd_show(self, items):
+        x = self.ma_signal_entry.winfo_rootx()
+        y = self.ma_signal_entry.winfo_rooty() + self.ma_signal_entry.winfo_height()
+
+        if self._ma_dd_win is None or not self._ma_dd_win.winfo_exists():
+            self._ma_dd_win = tk.Toplevel(self.root)
+            self._ma_dd_win.wm_overrideredirect(True)
+            self._ma_dd_win.wm_attributes("-topmost", True)
+            frame = tk.Frame(self._ma_dd_win, bd=1, relief="solid")
+            frame.pack(fill="both", expand=True)
+            sb = tk.Scrollbar(frame, orient="vertical")
+            self._ma_dd_lb = tk.Listbox(
+                frame,
+                yscrollcommand=sb.set,
+                selectmode="single",
+                activestyle="dotbox",
+                font=("TkDefaultFont", 10),
+                bg="#F1F8E9",
+                selectbackground="#66BB6A",
+                selectforeground="white",
+                height=min(8, len(items)),
+                width=30,
+                exportselection=False,
+            )
+            sb.config(command=self._ma_dd_lb.yview)
+            self._ma_dd_lb.pack(side="left", fill="both", expand=True)
+            sb.pack(side="right", fill="y")
+            self._ma_dd_lb.bind("<ButtonRelease-1>", self._ma_dd_click)
+            self._ma_dd_lb.bind("<Return>", lambda e: self._ma_dd_accept(e))
+
+        self._ma_dd_lb.delete(0, "end")
+        for item in items:
+            self._ma_dd_lb.insert("end", f"  {item}")
+        self._ma_dd_lb.config(height=min(8, len(items)))
+        self._ma_dd_win.geometry(f"+{x}+{y}")
+        self._ma_dd_win.deiconify()
+        self._ma_dd_sel = -1
+
+    def _ma_dd_hide(self):
+        if self._ma_dd_win and self._ma_dd_win.winfo_exists():
+            self._ma_dd_win.withdraw()
+        self._ma_dd_sel = -1
+
+    def _ma_dd_down(self, event):
+        if not self._ma_dd_items:
+            self._ma_dd_items = list(self._ma_all_signals)
+            self._ma_dd_show(self._ma_dd_items)
+            return "break"
+        if self._ma_dd_win and self._ma_dd_win.winfo_exists() and self._ma_dd_win.state() == "normal":
+            self._ma_dd_sel = min(self._ma_dd_sel + 1, len(self._ma_dd_items) - 1)
+            self._ma_dd_lb.selection_clear(0, "end")
+            self._ma_dd_lb.selection_set(self._ma_dd_sel)
+            self._ma_dd_lb.see(self._ma_dd_sel)
+        else:
+            self._ma_dd_show(self._ma_dd_items)
+        return "break"
+
+    def _ma_dd_up(self, event):
+        if not self._ma_dd_items: return "break"
+        self._ma_dd_sel = max(self._ma_dd_sel - 1, 0)
+        self._ma_dd_lb.selection_clear(0, "end")
+        self._ma_dd_lb.selection_set(self._ma_dd_sel)
+        self._ma_dd_lb.see(self._ma_dd_sel)
+        return "break"
+
+    def _ma_dd_accept(self, event=None):
+        idx = self._ma_dd_sel if self._ma_dd_sel >= 0 else (
+            self._ma_dd_lb.curselection()[0] if self._ma_dd_lb.curselection() else -1
+        )
+        if 0 <= idx < len(self._ma_dd_items):
+            self.ma_signal_var.set(self._ma_dd_items[idx])
+        self._ma_dd_hide()
+        return "break"
+
+    def _ma_dd_click(self, event):
+        idx = self._ma_dd_lb.nearest(event.y)
+        self._ma_dd_sel = idx
+        self._ma_dd_accept()
+
+    # ================================================================
+    # _add_ma / _remove_ma
+    # ================================================================
+    def _add_ma(self):
+        if self.filtered_df is None:
+            messagebox.showwarning("No data", "Load a CSV first.")
+            return
+        sig = self.ma_signal_var.get().strip()
+        if not sig:
+            messagebox.showwarning("No signal", "Select a signal for the moving average.")
+            return
+        if sig not in self.filtered_df.columns:
+            messagebox.showerror("Missing", f"\'{sig}\' not in current data.")
+            return
+
+        window_secs = self._ma_window_seconds()
+        if window_secs <= 0:
+            messagebox.showwarning("Zero window", "Set a window duration > 0.")
+            return
+
+        key = (sig, window_secs)
+        if key in self.ma_overlays:
+            messagebox.showinfo("Already added",
+                                f"{self._ma_label(sig, window_secs)} is already shown.")
+            return
+
+        color = self._ma_colors[len(self.ma_overlays) % len(self._ma_colors)]
+        self.ma_overlays[key] = color
+
+        ma_name = self._ma_label(sig, window_secs)
+
+        # Register in the name-keyed lookup used by _redraw_signals
+        self._ma_overlays_by_name[ma_name] = {
+            "key": key, "color": color, "sig": sig, "window_secs": window_secs
+        }
+
+        # Compute the MA column and inject into filtered_df (and df) so it
+        # flows through toggle / cursor / stats exactly like a real signal
+        window_rows = self._seconds_to_rows(window_secs)
+        ma_series = (
+            self.filtered_df[sig]
+            .rolling(window=window_rows, min_periods=1)
+            .mean()
+        )
+        self.filtered_df[ma_name] = ma_series.values
+        self.df[ma_name] = np.nan
+        self.df.loc[self.filtered_df.index, ma_name] = ma_series.values
+
+        # Add as a normal signal button (derived=True for the blue tint base,
+        # overridden by MA colour below) — use _add_signal_button then re-colour
+        self._add_signal_button(ma_name, derived=True)
+
+        # Override the button colour to the MA colour and attach the ✕ remover
+        widgets = self.all_signal_buttons[ma_name]
+        widgets["btn"].config(bg=color, fg="white",
+                              font=("TkDefaultFont", 8, "bold"))
+        widgets["side_btn"].config(text="L", bg="#1565C0")  # normal L/R toggle
+        widgets["is_ma"] = True   # flag so reset_plot knows to skip bg reset
+
+        # Attach right-click to remove (same as derived signals use right-click)
+        widgets["btn"].bind("<Button-3>",
+                            lambda e, k=key, n=ma_name: self._remove_ma(k, n))
+
+        self._redraw_signals()
+        self._update_secondary_visibility()
+        self.auto_adjust_yaxis()
+        self.canvas.draw_idle()
+
+    def _remove_ma(self, key, ma_name):
+        """Remove an MA overlay: clean up dicts, df column, and signal button."""
+        self.ma_overlays.pop(key, None)
+        self._ma_overlays_by_name.pop(ma_name, None)
+
+        # Remove the virtual column from both dataframes
+        for frame in (self.filtered_df, self.df):
+            if frame is not None and ma_name in frame.columns:
+                try:
+                    frame.drop(columns=[ma_name], inplace=True)
+                except Exception:
+                    pass
+
+        # Remove from signal_axis_map if currently active
+        self.signal_axis_map.pop(ma_name, None)
+        self.signal_side.pop(ma_name, None)
+
+        # Remove the button widget
+        widgets = self.all_signal_buttons.pop(ma_name, None)
+        if widgets:
+            widgets["frame"].destroy()
+
+        self._redraw_signals()
+        self._update_secondary_visibility()
+        self.auto_adjust_yaxis()
+        self.canvas.draw_idle()
+
+    def _refresh_ma_signal_list(self):
+        if self.filtered_df is None:
+            return
+        self._ma_all_signals = [c for c in self.filtered_df.columns if c != "Time"]
+        if self._ma_all_signals and not self.ma_signal_var.get():
+            self.ma_signal_var.set(self._ma_all_signals[0])
+
+    # ================================================================
+    # MOVING STD DEV — window helpers
+    # ================================================================
+    def _msd_window_seconds(self):
+        try: days  = int(self.msd_days_var.get())
+        except: days = 0
+        try: hours = int(self.msd_hours_var.get())
+        except: hours = 0
+        try: mins  = int(self.msd_mins_var.get())
+        except: mins = 0
+        return days * 86_400 + hours * 3_600 + mins * 60
+
+    def _update_msd_window_label(self, *_):
+        try:
+            secs = self._msd_window_seconds()
+        except Exception:
+            return
+        if secs <= 0:
+            self.msd_window_summary.config(text="= 0s")
+            return
+        d, rem = divmod(secs, 86_400)
+        h, rem = divmod(rem,  3_600)
+        m, s   = divmod(rem,  60)
+        parts = []
+        if d: parts.append(f"{d}d")
+        if h: parts.append(f"{h}h")
+        if m: parts.append(f"{m}m")
+        if s: parts.append(f"{s}s")
+        self.msd_window_summary.config(text="= " + " ".join(parts))
+
+    def _msd_label(self, sig, window_secs):
+        d, rem = divmod(int(window_secs), 86_400)
+        h, rem = divmod(rem, 3_600)
+        m, _   = divmod(rem, 60)
+        parts = []
+        if d: parts.append(f"{d}d")
+        if h: parts.append(f"{h}h")
+        if m: parts.append(f"{m}m")
+        duration = "".join(parts) or f"{int(window_secs)}s"
+        return f"MSD{duration}({sig})"
+
+    # ================================================================
+    # MOVING STD DEV — searchable dropdown
+    # ================================================================
+    def _on_msd_search_change(self, *_):
+        pass
+
+    def _on_msd_entry_key(self, event):
+        if event.keysym in ("Return", "Escape", "Up", "Down", "Tab"):
+            return
+        query = self.msd_signal_var.get().strip().lower()
+        filtered = [s for s in self._ma_all_signals if query in s.lower()]
+        if filtered:
+            self._msd_dd_items = filtered
+            self._msd_dd_show(filtered)
+        else:
+            self._msd_dd_hide()
+
+    def _msd_dd_show(self, items):
+        x = self.msd_signal_entry.winfo_rootx()
+        y = self.msd_signal_entry.winfo_rooty() + self.msd_signal_entry.winfo_height()
+
+        if self._msd_dd_win is None or not self._msd_dd_win.winfo_exists():
+            self._msd_dd_win = tk.Toplevel(self.root)
+            self._msd_dd_win.wm_overrideredirect(True)
+            self._msd_dd_win.wm_attributes("-topmost", True)
+            frame = tk.Frame(self._msd_dd_win, bd=1, relief="solid")
+            frame.pack(fill="both", expand=True)
+            sb = tk.Scrollbar(frame, orient="vertical")
+            self._msd_dd_lb = tk.Listbox(
+                frame,
+                yscrollcommand=sb.set,
+                selectmode="single",
+                activestyle="dotbox",
+                font=("TkDefaultFont", 10),
+                bg="#FFF3E0",
+                selectbackground="#FF8F00",
+                selectforeground="white",
+                height=min(8, len(items)),
+                width=30,
+                exportselection=False,
+            )
+            sb.config(command=self._msd_dd_lb.yview)
+            self._msd_dd_lb.pack(side="left", fill="both", expand=True)
+            sb.pack(side="right", fill="y")
+            self._msd_dd_lb.bind("<ButtonRelease-1>", self._msd_dd_click)
+            self._msd_dd_lb.bind("<Return>", lambda e: self._msd_dd_accept(e))
+
+        self._msd_dd_lb.delete(0, "end")
+        for item in items:
+            self._msd_dd_lb.insert("end", f"  {item}")
+        self._msd_dd_lb.config(height=min(8, len(items)))
+        self._msd_dd_win.geometry(f"+{x}+{y}")
+        self._msd_dd_win.deiconify()
+        self._msd_dd_sel = -1
+
+    def _msd_dd_hide(self):
+        if self._msd_dd_win and self._msd_dd_win.winfo_exists():
+            self._msd_dd_win.withdraw()
+        self._msd_dd_sel = -1
+
+    def _msd_dd_down(self, event):
+        if not self._msd_dd_items:
+            self._msd_dd_items = list(self._ma_all_signals)
+            self._msd_dd_show(self._msd_dd_items)
+            return "break"
+        if self._msd_dd_win and self._msd_dd_win.winfo_exists() and self._msd_dd_win.state() == "normal":
+            self._msd_dd_sel = min(self._msd_dd_sel + 1, len(self._msd_dd_items) - 1)
+            self._msd_dd_lb.selection_clear(0, "end")
+            self._msd_dd_lb.selection_set(self._msd_dd_sel)
+            self._msd_dd_lb.see(self._msd_dd_sel)
+        else:
+            self._msd_dd_show(self._msd_dd_items)
+        return "break"
+
+    def _msd_dd_up(self, event):
+        if not self._msd_dd_items: return "break"
+        self._msd_dd_sel = max(self._msd_dd_sel - 1, 0)
+        self._msd_dd_lb.selection_clear(0, "end")
+        self._msd_dd_lb.selection_set(self._msd_dd_sel)
+        self._msd_dd_lb.see(self._msd_dd_sel)
+        return "break"
+
+    def _msd_dd_accept(self, event=None):
+        idx = self._msd_dd_sel if self._msd_dd_sel >= 0 else (
+            self._msd_dd_lb.curselection()[0] if self._msd_dd_lb.curselection() else -1
+        )
+        if 0 <= idx < len(self._msd_dd_items):
+            self.msd_signal_var.set(self._msd_dd_items[idx])
+        self._msd_dd_hide()
+        return "break"
+
+    def _msd_dd_click(self, event):
+        idx = self._msd_dd_lb.nearest(event.y)
+        self._msd_dd_sel = idx
+        self._msd_dd_accept()
+
+    # ================================================================
+    # _add_msd / _remove_msd
+    # ================================================================
+    def _add_msd(self):
+        if self.filtered_df is None:
+            messagebox.showwarning("No data", "Load a CSV first.")
+            return
+        sig = self.msd_signal_var.get().strip()
+        if not sig:
+            messagebox.showwarning("No signal", "Select a signal for the moving std dev.")
+            return
+        if sig not in self.filtered_df.columns:
+            messagebox.showerror("Missing", f"'{sig}' not in current data.")
+            return
+
+        window_secs = self._msd_window_seconds()
+        if window_secs <= 0:
+            messagebox.showwarning("Zero window", "Set a window duration > 0.")
+            return
+
+        key = (sig, window_secs)
+        if key in self.msd_overlays:
+            messagebox.showinfo("Already added",
+                                f"{self._msd_label(sig, window_secs)} is already shown.")
+            return
+
+        color = self._msd_colors[len(self.msd_overlays) % len(self._msd_colors)]
+        self.msd_overlays[key] = color
+
+        msd_name = self._msd_label(sig, window_secs)
+
+        self._msd_overlays_by_name[msd_name] = {
+            "key": key, "color": color, "sig": sig, "window_secs": window_secs
+        }
+
+        # Compute rolling std and inject as virtual column
+        window_rows = self._seconds_to_rows(window_secs)
+        msd_series = (
+            self.filtered_df[sig]
+            .rolling(window=window_rows, min_periods=2)
+            .std()
+            .fillna(0)
+        )
+        self.filtered_df[msd_name] = msd_series.values
+        self.df[msd_name] = np.nan
+        self.df.loc[self.filtered_df.index, msd_name] = msd_series.values
+
+        self._add_signal_button(msd_name, derived=True)
+
+        widgets = self.all_signal_buttons[msd_name]
+        widgets["btn"].config(bg=color, fg="white",
+                              font=("TkDefaultFont", 8, "bold"))
+        widgets["side_btn"].config(text="L", bg="#1565C0")
+        widgets["is_ma"] = True   # reuse flag — marks overlay buttons generically
+
+        widgets["btn"].bind("<Button-3>",
+                            lambda e, k=key, n=msd_name: self._remove_msd(k, n))
+
+        self._redraw_signals()
+        self._update_secondary_visibility()
+        self.auto_adjust_yaxis()
+        self.canvas.draw_idle()
+
+    def _remove_msd(self, key, msd_name):
+        self.msd_overlays.pop(key, None)
+        self._msd_overlays_by_name.pop(msd_name, None)
+
+        for frame in (self.filtered_df, self.df):
+            if frame is not None and msd_name in frame.columns:
+                try:
+                    frame.drop(columns=[msd_name], inplace=True)
+                except Exception:
+                    pass
+
+        self.signal_axis_map.pop(msd_name, None)
+        self.signal_side.pop(msd_name, None)
+
+        widgets = self.all_signal_buttons.pop(msd_name, None)
+        if widgets:
+            widgets["frame"].destroy()
+
+        self._redraw_signals()
+        self._update_secondary_visibility()
+        self.auto_adjust_yaxis()
+        self.canvas.draw_idle()
+
+    def _refresh_msd_signal_list(self):
+        # MSD reuses _ma_all_signals (same source list); just seed default value
+        if self._ma_all_signals and not self.msd_signal_var.get():
+            self.msd_signal_var.set(self._ma_all_signals[0])
 
     # ================================================================
     # FOURIER TRANSFORM
