@@ -152,7 +152,7 @@ class TrendViewer:
 
         tk.Button(f, text="Apply",   command=self.apply_time_filter).grid(row=0, column=6, padx=5)
         tk.Button(f, text="Export",  command=self.export_csv).grid(row=0, column=7, padx=5)
-        tk.Button(f, text="Reset X", command=self.reset_x).grid(row=0, column=8, padx=5)
+        tk.Button(f, text="Reset X", command=lambda: self.reset_x(absolute=True)).grid(row=0, column=8, padx=5)
         tk.Button(f, text="FFT", command=self.show_fft,
                   bg="#7B1FA2", fg="white", font=("TkDefaultFont", 9, "bold")
                   ).grid(row=0, column=9, padx=5)
@@ -1352,10 +1352,13 @@ class TrendViewer:
         self.end_time.delete(0, "end")
         self.end_time.insert(0, dtimes[1].strftime("%H:%M:%S"))
 
-    def reset_x(self):
+    def reset_x(self, absolute = False):
         if self.filtered_df is None: return
         xmin = self.filtered_df["Time"].min()
         xmax = self.filtered_df["Time"].max()
+        if absolute:
+            xmin = self.df["Time"].min()
+            xmax = self.df["Time"].max()
         self.ax_main.set_xlim(xmin, xmax)
         self.ax_roc.set_xlim(xmin, xmax)
         self.update_time_entries()
@@ -1363,6 +1366,8 @@ class TrendViewer:
         self.auto_adjust_yaxis()
         self.update_stats_label()
         self.canvas.draw_idle()
+        if absolute:
+            self.apply_time_filter()
 
     # ================================================================
     # MOVING AVERAGE
