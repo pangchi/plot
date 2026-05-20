@@ -87,7 +87,7 @@ def evaluate_expression(expr, df):
 class TrendViewer:
 
     # How many button rows before the panel scrolls horizontally
-    _MAX_SIGNAL_ROWS = 8
+    _MAX_SIGNAL_ROWS = 3
     # 5 % Y-axis breathing room above and below the data range
     _Y_PAD = 0.05
 
