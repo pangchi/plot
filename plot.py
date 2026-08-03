@@ -29,6 +29,7 @@ import bisect
 
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.ticker import FuncFormatter
 import matplotlib.dates as mdates
 
 # ---------------- DOWNSAMPLE HELPER ----------------
@@ -102,6 +103,8 @@ class TrendViewer:
         self.signal_side = {}
         self.highlight_markers = []
         self.last_loaded_file = None
+        self.time_is_elapsed = False   # True when Time column is numeric seconds starting at 0
+        self._time_origin = None       # anchor Timestamp used to re-derive elapsed seconds
         self.derived_signals = {}
         self.all_signal_buttons = {}
 
@@ -665,14 +668,47 @@ class TrendViewer:
     # ================================================================
     def load_csv_dnd(self, event): self.load_csv(event.data.strip("{}"))
 
+    @staticmethod
+    def _format_elapsed(secs):
+        """Format a duration in seconds as elapsed time, e.g. '0s', '12.5s', '3:07', '1:02:03'."""
+        neg = secs < 0
+        secs = abs(secs)
+        h = int(secs // 3600)
+        m = int((secs % 3600) // 60)
+        s = secs % 60
+        if h:
+            out = f"{h}:{m:02d}:{s:05.2f}"
+        elif m:
+            out = f"{m}:{s:05.2f}"
+        else:
+            out = f"{s:g}s"
+        return ("-" + out) if neg else out
+
+    def _elapsed_seconds(self, ts):
+        """Seconds elapsed since the anchor origin for a given Timestamp (elapsed-time mode only)."""
+        return (ts - self._time_origin).total_seconds()
+
     def load_csv(self, path):
         try:
             self.df = pd.read_csv(path)
-            self.df["Time"] = pd.to_datetime(self.df["Time"], utc=False)
-            if self.df["Time"].dt.tz is not None:
-                self.df["Time"] = (self.df["Time"]
-                    .dt.tz_convert(datetime.now().astimezone().tzinfo)
-                    .dt.tz_localize(None))
+            raw_time = self.df["Time"]
+            numeric_time = pd.to_numeric(raw_time, errors="coerce")
+            # If every Time value is numeric and the series starts at 0, treat it as
+            # elapsed seconds rather than a calendar date (pd.to_datetime on plain
+            # numbers otherwise interprets them as nanoseconds since 1970-01-01).
+            self.time_is_elapsed = bool(
+                numeric_time.notna().all() and float(numeric_time.min()) == 0.0
+            )
+            if self.time_is_elapsed:
+                self._time_origin = pd.Timestamp(0)
+                self.df["Time"] = self._time_origin + pd.to_timedelta(numeric_time, unit="s")
+            else:
+                self._time_origin = None
+                self.df["Time"] = pd.to_datetime(self.df["Time"], utc=False)
+                if self.df["Time"].dt.tz is not None:
+                    self.df["Time"] = (self.df["Time"]
+                        .dt.tz_convert(datetime.now().astimezone().tzinfo)
+                        .dt.tz_localize(None))
         except Exception as e:
             messagebox.showerror("Error", str(e)); return
 
@@ -816,6 +852,15 @@ class TrendViewer:
         self.ax_roc_r.set_ylabel("ROC (right)", color="#BF360C", labelpad=2)
         self.ax_main_r.tick_params(axis="y", colors="#BF360C")
         self.ax_roc_r.tick_params(axis="y", colors="#BF360C")
+
+        if self.time_is_elapsed:
+            origin_num = mdates.date2num(self._time_origin)
+            fmt = FuncFormatter(lambda val, pos: self._format_elapsed((val - origin_num) * 86400.0))
+            self.ax_main.xaxis.set_major_formatter(fmt)
+            self.ax_roc.xaxis.set_major_formatter(fmt)
+            self.ax_main.set_xlabel("Elapsed time")
+            self.ax_roc.set_xlabel("Elapsed time")
+
         self.signal_axis_map.clear()
 
         for name, widgets in self.all_signal_buttons.items():
@@ -958,7 +1003,10 @@ class TrendViewer:
 
         x = event.xdata
         if x is None: return
-        x_str = mdates.num2date(x).strftime("%Y-%m-%d %H:%M:%S")
+        if self.time_is_elapsed:
+            x_str = self._format_elapsed((x - mdates.date2num(self._time_origin)) * 86400.0)
+        else:
+            x_str = mdates.num2date(x).strftime("%Y-%m-%d %H:%M:%S")
         self.vline_main.set_xdata([x]); self.vline_roc.set_xdata([x])
         self.vline_main.set_visible(True); self.vline_roc.set_visible(True)
 
@@ -991,7 +1039,8 @@ class TrendViewer:
             vals = self.filtered_df[s][mask]
             side_tag = "R" if self.signal_side.get(s, "left") == "right" else "L"
             tooltip_lines.append(
-                f"{s} [{side_tag}]:\nTime={self.filtered_df['Time'].iloc[idx]}\n"
+                f"{s} [{side_tag}]:\n"
+                f"Time={self._format_elapsed(self._elapsed_seconds(self.filtered_df['Time'].iloc[idx])) if self.time_is_elapsed else self.filtered_df['Time'].iloc[idx]}\n"
                 f"y={y_val:.4f}  ROC={roc:.4f}/s\n"
                 f"Min={vals.min():.4f}  Max={vals.max():.4f}  Mean={vals.mean():.4f}  Std={vals.std():.4f}"
             )
