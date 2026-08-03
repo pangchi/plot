@@ -103,6 +103,7 @@ class TrendViewer:
         self.signal_side = {}
         self.highlight_markers = []
         self.last_loaded_file = None
+        self.loaded_files = {}         # path -> (df, is_elapsed), insertion-ordered
         self.time_is_elapsed = False   # True when Time column is numeric seconds starting at 0
         self._time_origin = None       # anchor Timestamp used to re-derive elapsed seconds
         self.derived_signals = {}
@@ -136,10 +137,16 @@ class TrendViewer:
         root.bind("<Print>", self.save_screenshot)
 
         # -------- Drop area --------
-        drop = tk.Label(root, text="Drag CSV here", bg="lightgray", height=2)
+        drop = tk.Label(root, text="Drag CSV here (drop more to add, one at a time or together)",
+                         bg="lightgray", height=2)
         drop.pack(fill="x")
         drop.drop_target_register(DND_FILES)
         drop.dnd_bind("<<Drop>>", self.load_csv_dnd)
+
+        # -------- Loaded files panel --------
+        self.files_frame = tk.Frame(root)
+        self.files_frame.pack(fill="x", padx=6, pady=(2, 0))
+        self._refresh_files_panel()
 
         # -------- Time controls --------
         f = tk.Frame(root)
@@ -666,7 +673,11 @@ class TrendViewer:
     # ================================================================
     # CSV LOAD
     # ================================================================
-    def load_csv_dnd(self, event): self.load_csv(event.data.strip("{}"))
+    def load_csv_dnd(self, event):
+        # tkinterdnd2 gives one space-separated string; paths containing spaces
+        # are wrapped in {}. Multiple files can be dropped at once.
+        paths = [p.strip("{}") for p in re.findall(r"\{[^}]*\}|\S+", event.data)]
+        self.load_csv(paths)
 
     @staticmethod
     def _format_elapsed(secs):
@@ -688,31 +699,104 @@ class TrendViewer:
         """Seconds elapsed since the anchor origin for a given Timestamp (elapsed-time mode only)."""
         return (ts - self._time_origin).total_seconds()
 
-    def load_csv(self, path):
+    def _read_one_csv(self, path):
+        """Read a single CSV and parse its Time column. Returns (df, is_elapsed)."""
+        df = pd.read_csv(path)
+        if "Time" not in df.columns:
+            raise ValueError(f"'{os.path.basename(path)}' has no 'Time' column.")
+        raw_time = df["Time"]
+        numeric_time = pd.to_numeric(raw_time, errors="coerce")
+        # If every Time value is numeric and the series starts at 0, treat it as
+        # elapsed seconds rather than a calendar date (pd.to_datetime on plain
+        # numbers otherwise interprets them as nanoseconds since 1970-01-01).
+        is_elapsed = bool(numeric_time.notna().all() and float(numeric_time.min()) == 0.0)
+        if is_elapsed:
+            df["Time"] = pd.Timestamp(0) + pd.to_timedelta(numeric_time, unit="s")
+        else:
+            df["Time"] = pd.to_datetime(df["Time"], utc=False)
+            if df["Time"].dt.tz is not None:
+                df["Time"] = (df["Time"]
+                    .dt.tz_convert(datetime.now().astimezone().tzinfo)
+                    .dt.tz_localize(None))
+        return df, is_elapsed
+
+    def load_csv(self, paths):
+        if isinstance(paths, str):
+            paths = [paths]
+
         try:
-            self.df = pd.read_csv(path)
-            raw_time = self.df["Time"]
-            numeric_time = pd.to_numeric(raw_time, errors="coerce")
-            # If every Time value is numeric and the series starts at 0, treat it as
-            # elapsed seconds rather than a calendar date (pd.to_datetime on plain
-            # numbers otherwise interprets them as nanoseconds since 1970-01-01).
-            self.time_is_elapsed = bool(
-                numeric_time.notna().all() and float(numeric_time.min()) == 0.0
-            )
-            if self.time_is_elapsed:
-                self._time_origin = pd.Timestamp(0)
-                self.df["Time"] = self._time_origin + pd.to_timedelta(numeric_time, unit="s")
-            else:
-                self._time_origin = None
-                self.df["Time"] = pd.to_datetime(self.df["Time"], utc=False)
-                if self.df["Time"].dt.tz is not None:
-                    self.df["Time"] = (self.df["Time"]
-                        .dt.tz_convert(datetime.now().astimezone().tzinfo)
-                        .dt.tz_localize(None))
+            for p in paths:
+                self.loaded_files[p] = self._read_one_csv(p)  # (df, is_elapsed)
         except Exception as e:
             messagebox.showerror("Error", str(e)); return
 
-        self.last_loaded_file = path
+        self._rebuild_and_refresh()
+
+    def remove_file(self, path):
+        self.loaded_files.pop(path, None)
+        self._rebuild_and_refresh()
+
+    def _refresh_files_panel(self):
+        for w in self.files_frame.winfo_children(): w.destroy()
+        if not self.loaded_files:
+            tk.Label(self.files_frame, fg="gray", text="No files loaded").pack(side="left")
+            return
+        for path in self.loaded_files:
+            chip = tk.Frame(self.files_frame, bd=1, relief="solid", bg="#E3F2FD")
+            chip.pack(side="left", padx=3, pady=2)
+            tk.Label(chip, text=os.path.basename(path), bg="#E3F2FD",
+                     font=("TkDefaultFont", 8)).pack(side="left", padx=(4, 0))
+            tk.Button(chip, text="\u00d7", bg="#E3F2FD", fg="#B00020", bd=0,
+                      font=("TkDefaultFont", 9, "bold"), padx=4,
+                      command=lambda p=path: self.remove_file(p)
+                      ).pack(side="left", padx=(2, 2))
+
+    def _rebuild_and_refresh(self):
+        self._refresh_files_panel()
+
+        if not self.loaded_files:
+            self.df = None; self.filtered_df = None
+            self.last_loaded_file = None
+            self.time_is_elapsed = False; self._time_origin = None
+            self.derived_signals.clear(); self.all_signal_buttons.clear()
+            self.signal_side.clear(); self.signal_axis_map.clear()
+            self.ma_overlays.clear(); self._ma_overlays_by_name.clear()
+            self.msd_overlays.clear(); self._msd_overlays_by_name.clear()
+            for w in self.signal_frame.winfo_children(): w.destroy()
+            self.reset_plot()
+            self._refresh_ma_signal_list(); self._refresh_msd_signal_list()
+            return
+
+        paths = list(self.loaded_files.keys())
+
+        # Elapsed-time mode only applies when every loaded file is elapsed;
+        # a mix falls back to treating everything as absolute Time values.
+        self.time_is_elapsed = all(is_elapsed for _, is_elapsed in self.loaded_files.values())
+        self._time_origin = pd.Timestamp(0) if self.time_is_elapsed else None
+
+        try:
+            merged, seen_cols = None, set()
+            for path in paths:
+                df, _ = self.loaded_files[path]
+                df = df.copy()
+                stem = os.path.splitext(os.path.basename(path))[0]
+                if merged is None:
+                    merged = df
+                    seen_cols.update(c for c in df.columns if c != "Time")
+                else:
+                    rename = {}
+                    for c in df.columns:
+                        if c == "Time": continue
+                        rename[c] = f"{stem}_{c}" if c in seen_cols else c
+                    df = df.rename(columns=rename)
+                    seen_cols.update(rename.values())
+                    merged = pd.merge(merged, df, on="Time", how="outer")
+
+            self.df = merged.sort_values("Time").reset_index(drop=True)
+        except Exception as e:
+            messagebox.showerror("Error", str(e)); return
+
+        self.last_loaded_file = paths[0]
         self.derived_signals.clear(); self.all_signal_buttons.clear()
         self.signal_side.clear()
         self.ma_overlays.clear(); self._ma_overlays_by_name.clear()
