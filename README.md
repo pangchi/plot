@@ -24,12 +24,25 @@ python trendviewer.py
 
 ## CSV Format
 
-The file must have a `Time` column parseable by `pandas.to_datetime`. All other columns are treated as numeric signals. Timezone-aware timestamps are converted to local time on load.
+The file must have a `Time` column. Two formats are supported:
+
+- **Calendar timestamps** — parsed with `pandas.to_datetime` (e.g. `2024-01-15 08:00:00`). Timezone-aware timestamps are converted to local time on load.
+- **Elapsed seconds** — if every value in `Time` is numeric and the column starts at `0`, it's treated as seconds elapsed rather than a calendar date. The chart axes, crosshair, and tooltip then show elapsed time (`0s`, `12.5s`, `1:02:03`) instead of a date.
+
+All other columns are treated as numeric signals.
 
 ```
 Time,Temperature,Pressure,FlowRate
 2024-01-15 08:00:00,22.3,1013.2,4.7
 2024-01-15 08:00:01,22.4,1013.1,4.8
+...
+```
+
+```
+Time,Temperature,Pressure
+0,22.3,1013.2
+1,22.4,1013.1
+2,22.6,1013.0
 ...
 ```
 
@@ -40,6 +53,12 @@ Time,Temperature,Pressure,FlowRate
 ### Loading Data
 
 Drag a CSV file onto the **"Drag CSV here"** bar at the top, or modify the script to call `load_csv(path)` directly. The time range pickers are set automatically to the full extent of the data.
+
+**Multiple files** can be loaded at once — either drop several CSVs together, or drop them in one at a time; each new drop is added to what's already loaded rather than replacing it. Files are aligned and merged on the `Time` column (an outer join, so mismatched timestamps just leave gaps rather than failing). If two files share a column name, every file after the first has its filename prefixed onto the clashing column (e.g. `sensorB_Temp`); columns unique to a file keep their plain name.
+
+Elapsed-time mode only applies when **every** loaded file uses elapsed seconds — mixing an elapsed-time file with a calendar-timestamp file falls back to treating all `Time` values as absolute.
+
+Loaded files are listed as chips under the drop bar; click the **×** on a chip to remove that file and re-merge the rest. Removing the last file clears the chart.
 
 ### Time Range Filter
 
